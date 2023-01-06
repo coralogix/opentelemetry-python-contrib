@@ -95,8 +95,14 @@ from opentelemetry.trace import (
     TracerProvider,
     get_tracer,
     get_tracer_provider,
+    set_span_in_context
 )
 from opentelemetry.trace.propagation import get_current_span
+import json
+#import traceback
+#import tracemalloc
+
+#tracemalloc.start(25)
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +117,7 @@ OTEL_LAMBDA_DISABLE_AWS_CONTEXT_PROPAGATION = (
 )
 
 
-def _default_event_context_extractor(lambda_event: Any) -> Context:
+def _default_event_context_extractor(args: Any) -> Context:
     """Default way of extracting the context from the Lambda Event.
 
     Assumes the Lambda Event is a map with the headers under the 'headers' key.
@@ -129,6 +135,25 @@ def _default_event_context_extractor(lambda_event: Any) -> Context:
     Returns:
         A Context with configuration found in the event.
     """
+
+    lambda_event = args[0]
+
+    #print("lambda_event")
+    #print("args")
+    #print(args)
+    #print("context")
+    #print(json.dumps(args[1], indent=4, sort_keys=True, default=str))
+    context = args[1]
+    try:
+        #print(json.dumps(context.client_context.custom, indent=4, sort_keys=True, default=str))
+
+        return get_global_textmap().extract(context.client_context.custom)
+    except Exception as ex:
+        #print(traceback.format_exc())
+        #print("exception")
+        #print(ex)
+        pass
+
     headers = None
     try:
         headers = lambda_event["headers"]
@@ -203,6 +228,12 @@ def _set_api_gateway_v1_proxy_attributes(
     )
     span.set_attribute(SpanAttributes.HTTP_ROUTE, lambda_event.get("resource"))
 
+    if lambda_event.get("body"):
+        span.set_attribute(
+            "http.request.body",
+            lambda_event.get("body"),
+        )
+
     if lambda_event.get("headers"):
         span.set_attribute(
             SpanAttributes.HTTP_USER_AGENT,
@@ -237,6 +268,12 @@ def _set_api_gateway_v2_proxy_attributes(
     More info:
     https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-develop-integrations-lambda.html
     """
+    if lambda_event.get("body"):
+        span.set_attribute(
+            "http.request.body",
+            lambda_event.get("body"),
+        )
+
     span.set_attribute(
         SpanAttributes.NET_HOST_NAME,
         lambda_event["requestContext"].get("domainName"),
@@ -289,7 +326,7 @@ def _instrument(
         lambda_event = args[0]
 
         parent_context = _determine_parent_context(
-            lambda_event,
+            args,
             event_context_extractor,
             disable_aws_context_propagation,
         )
@@ -308,68 +345,341 @@ def _instrument(
                 # https://docs.aws.amazon.com/AmazonS3/latest/userguide/notification-content-structure.html
                 # https://docs.aws.amazon.com/lambda/latest/dg/with-ddb.html
                 span_kind = SpanKind.CONSUMER
+
             else:
                 span_kind = SpanKind.SERVER
         except (IndexError, KeyError, TypeError):
             span_kind = SpanKind.SERVER
-
+      
         tracer = get_tracer(__name__, __version__, tracer_provider)
 
-        with tracer.start_as_current_span(
-            name=orig_handler_name,
-            context=parent_context,
-            kind=span_kind,
-        ) as span:
-            if span.is_recording():
-                lambda_context = args[1]
-                # NOTE: The specs mention an exception here, allowing the
-                # `ResourceAttributes.FAAS_ID` attribute to be set as a span
-                # attribute instead of a resource attribute.
-                #
-                # See more:
-                # https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/semantic_conventions/faas.md#example
-                span.set_attribute(
-                    ResourceAttributes.FAAS_ID,
-                    lambda_context.invoked_function_arn,
-                )
-                span.set_attribute(
-                    SpanAttributes.FAAS_EXECUTION,
-                    lambda_context.aws_request_id,
-                )
-
-            result = call_wrapped(*args, **kwargs)
-
+        apiGwSpan = None
+        try:
             # If the request came from an API Gateway, extract http attributes from the event
             # https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/semantic_conventions/instrumentation/aws-lambda.md#api-gateway
             # https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/semantic_conventions/http.md#http-server-semantic-conventions
             if isinstance(lambda_event, dict) and lambda_event.get(
                 "requestContext"
             ):
-                span.set_attribute(SpanAttributes.FAAS_TRIGGER, "http")
-
+                span_name = orig_handler_name
+                if lambda_event.get("resource"):
+                    span_name = lambda_event.get("resource")
+                if lambda_event.get("requestContext") and lambda_event["requestContext"].get("http"):
+                    span_name = lambda_event["requestContext"]["http"].get("path")
+                
+                apiGwSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.CLIENT)
                 if lambda_event.get("version") == "2.0":
-                    _set_api_gateway_v2_proxy_attributes(lambda_event, span)
+                    apiGwSpan.set_attribute("faas.trigger.type", "Api Gateway Rest")
                 else:
-                    _set_api_gateway_v1_proxy_attributes(lambda_event, span)
+                    apiGwSpan.set_attribute("faas.trigger.type", "Api Gateway HTTP")
+                
+                apiGwSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "http")
 
-                if isinstance(result, dict) and result.get("statusCode"):
+                parent_context = set_span_in_context(apiGwSpan)
+        except Exception as ex:
+            pass
+        # S3 trigger new span and request attributes
+        s3TriggerSpan = None
+        try:
+            if lambda_event["Records"][0]["eventSource"] in {
+                "aws:s3",
+            }:
+                span_name = orig_handler_name
+                if lambda_event["Records"][0].get("eventName"):
+                    span_name = lambda_event["Records"][0].get("eventName")
+
+                s3TriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.PRODUCER)
+                s3TriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "datasource")
+                s3TriggerSpan.set_attribute("faas.trigger.type", "S3")
+
+                parent_context = set_span_in_context(s3TriggerSpan)
+
+                if lambda_event["Records"][0].get("s3"):
+                    s3TriggerSpan.set_attribute(
+                        "rpc.request.body",
+                        json.dumps(lambda_event["Records"][0].get("s3")),
+                    )    
+        except Exception as ex:
+            pass
+
+        sqsTriggerSpan = None
+        try:
+            if lambda_event["Records"][0]["eventSource"] in {
+                "aws:sqs",
+            }:
+                span_name = orig_handler_name
+                sqsTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.PRODUCER)
+                sqsTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "pubsub")
+                sqsTriggerSpan.set_attribute("faas.trigger.type", "SQS")
+
+                parent_context = set_span_in_context(sqsTriggerSpan)
+
+                if lambda_event["Records"][0].get("body"):
+                    sqsTriggerSpan.set_attribute(
+                        "rpc.request.body",
+                        lambda_event["Records"][0].get("body"),
+                    )    
+        except Exception as ex:
+            pass
+
+        snsTriggerSpan = None
+        try:
+            if lambda_event["Records"][0]["EventSource"] == "aws:sns":
+                span_kind = SpanKind.CONSUMER
+                span_name = orig_handler_name
+                snsTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.PRODUCER)
+                snsTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "pubsub")
+                snsTriggerSpan.set_attribute("faas.trigger.type", "SNS")
+
+                parent_context = set_span_in_context(snsTriggerSpan)
+
+                if lambda_event["Records"][0]["Sns"] and lambda_event["Records"][0]["Sns"].get("Message"):
+                    snsTriggerSpan.set_attribute(
+                        "rpc.request.body",
+                        lambda_event["Records"][0]["Sns"].get("Message"),
+                    )    
+        except Exception as ex:
+            pass
+
+        dynamoTriggerSpan = None
+        try:
+            if lambda_event["Records"][0]["eventSource"] == "aws:dynamodb":
+                span_name = orig_handler_name
+                if lambda_event["Records"][0].get("eventName"):
+                    span_name = lambda_event["Records"][0].get("eventName")
+
+                dynamoTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.PRODUCER)
+                dynamoTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "datasource")
+                dynamoTriggerSpan.set_attribute("faas.trigger.type", "Dynamo DB")
+
+                parent_context = set_span_in_context(dynamoTriggerSpan)
+
+                if lambda_event["Records"][0].get("dynamodb"):
+                    dynamoTriggerSpan.set_attribute(
+                        "rpc.request.body",
+                        json.dumps(lambda_event["Records"][0].get("dynamodb")),
+                    )    
+        except Exception as ex:
+            pass
+
+        cognitoTriggerSpan = None
+        try:
+            if lambda_event["eventType"] == "SyncTrigger":
+                span_name = orig_handler_name
+                if lambda_event.get("eventType"):
+                    span_name = lambda_event.get("eventType") 
+
+                cognitoTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.PRODUCER)
+                cognitoTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "datasource")
+                cognitoTriggerSpan.set_attribute("faas.trigger.type", "Cognito")
+
+                parent_context = set_span_in_context(cognitoTriggerSpan)
+
+                if lambda_event["datasetRecords"]:
+                    cognitoTriggerSpan.set_attribute(
+                        "rpc.request.body",
+                        json.dumps(lambda_event["datasetRecords"]),
+                    )
+        except Exception as ex:
+            pass
+
+        try:
+            with tracer.start_as_current_span(
+                name=orig_handler_name,
+                context=parent_context,
+                kind=span_kind,
+            ) as span:
+                if span.is_recording():
+                    lambda_context = args[1]
+                    # NOTE: The specs mention an exception here, allowing the
+                    # `ResourceAttributes.FAAS_ID` attribute to be set as a span
+                    # attribute instead of a resource attribute.
+                    #
+                    # See more:
+                    # https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/semantic_conventions/faas.md#example
                     span.set_attribute(
-                        SpanAttributes.HTTP_STATUS_CODE,
-                        result.get("statusCode"),
+                        ResourceAttributes.FAAS_ID,
+                        lambda_context.invoked_function_arn,
+                    )
+                    span.set_attribute(
+                        SpanAttributes.FAAS_EXECUTION,
+                        lambda_context.aws_request_id,
                     )
 
-        now = time.time()
-        _tracer_provider = tracer_provider or get_tracer_provider()
-        if hasattr(_tracer_provider, "force_flush"):
-            try:
-                # NOTE: `force_flush` before function quit in case of Lambda freeze.
-                _tracer_provider.force_flush(flush_timeout)
-            except Exception:  # pylint: disable=broad-except
-                logger.exception("TracerProvider failed to flush traces")
-        else:
-            logger.warning(
-                "TracerProvider was missing `force_flush` method. This is necessary in case of a Lambda freeze and would exist in the OTel SDK implementation."
-            )
+                result = call_wrapped(*args, **kwargs)
+
+                # If the request came from an AlambdaPI Gateway, extract http attributes from the event
+                # https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/semantic_conventions/instrumentation/aws-lambda.md#api-gateway
+                # https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/semantic_conventions/http.md#http-server-semantic-conventions
+                try:
+                    if lambda_event and apiGwSpan is not None and lambda_event.get("requestContext"):
+                        apiGwSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "http")
+
+                        if lambda_event.get("version") == "2.0":
+                            _set_api_gateway_v2_proxy_attributes(lambda_event, apiGwSpan)
+                        else:
+                            _set_api_gateway_v1_proxy_attributes(lambda_event, apiGwSpan)
+
+                        if isinstance(result, dict) and result.get("statusCode"):
+                            apiGwSpan.set_attribute(
+                                SpanAttributes.HTTP_STATUS_CODE,
+                                result.get("statusCode"),
+                            )
+                        if isinstance(result, dict) and result.get("body"):
+                            apiGwSpan.set_attribute(
+                                "http.response.body",
+                                result.get("body"),
+                            )
+                        if lambda_event.get("headers"):
+                            for key, value in lambda_event.get("headers").items():
+                                apiGwSpan.set_attribute("http.request.header." + key.lower().replace("-", "_"), value)
+
+                        if lambda_event["requestContext"].get("domainName") and lambda_event["requestContext"].get("http") and lambda_event["requestContext"].get("http").get("path"):
+                            apiGwSpan.set_attribute(
+                                SpanAttributes.HTTP_URL,
+                                lambda_event["requestContext"].get("domainName") + lambda_event["requestContext"].get("http").get("path")
+                            )
+                        apiGwSpan.end()
+                    try:
+                        if lambda_event["Records"][0]["eventSource"] == "aws:sqs":
+                            span.set_attribute(SpanAttributes.FAAS_TRIGGER, "pubsub")
+                            span.set_attribute("messaging.message",
+                                            lambda_event["Records"])
+                    except Exception:
+                        pass
+                except Exception:
+                    # TODO check why we get exception
+                    #print(traceback.format_exc())
+                    #print("exception")
+                    #print(ex)
+                    # logger.error(
+                    #    "TracerProvider was missing `force_flush` method. This is necessary in case of a Lambda freeze and would exist in the OTel SDK implementation."
+                    # )
+                    pass
+
+                # S3 trigger response attributes
+                if lambda_event and s3TriggerSpan is not None:
+                    try:
+                        if isinstance(result, dict) and result.get("statusCode"):
+                            s3TriggerSpan.set_attribute(
+                                SpanAttributes.HTTP_STATUS_CODE,
+                                result.get("statusCode"),
+                            )
+                        if isinstance(result, dict) and result.get("body"):
+                            s3TriggerSpan.set_attribute(
+                                "rpc.response.body",
+                                result.get("body"),
+                            )
+                    except Exception:
+                        pass
+                    s3TriggerSpan.end()
+
+                # SQS trigger response attributes
+                if lambda_event and sqsTriggerSpan is not None:
+                    try:
+                        if isinstance(result, dict) and result.get("statusCode"):
+                            sqsTriggerSpan.set_attribute(
+                                SpanAttributes.HTTP_STATUS_CODE,
+                                result.get("statusCode"),
+                            )
+                        if isinstance(result, dict) and result.get("body"):
+                            sqsTriggerSpan.set_attribute(
+                                "rpc.response.body",
+                                result.get("body"),
+                            )
+                    except Exception:
+                        pass
+                    sqsTriggerSpan.end()
+
+                if lambda_event and snsTriggerSpan is not None:
+                    try:
+                        if isinstance(result, dict) and result.get("statusCode"):
+                            snsTriggerSpan.set_attribute(
+                                SpanAttributes.HTTP_STATUS_CODE,
+                                result.get("statusCode"),
+                            )
+                        if isinstance(result, dict) and result.get("body"):
+                            snsTriggerSpan.set_attribute(
+                                "rpc.response.body",
+                                result.get("body"),
+                            )
+                    except Exception:
+                        pass
+                    snsTriggerSpan.end()
+
+
+                if lambda_event and dynamoTriggerSpan is not None:
+                    try:
+                        if isinstance(result, dict) and result.get("statusCode"):
+                            dynamoTriggerSpan.set_attribute(
+                                SpanAttributes.HTTP_STATUS_CODE,
+                                result.get("statusCode"),
+                            )
+                        if isinstance(result, dict) and result.get("body"):
+                            dynamoTriggerSpan.set_attribute(
+                                "rpc.response.body",
+                                result.get("body"),
+                            )
+                    except Exception:
+                        pass
+                    dynamoTriggerSpan.end()
+
+                if lambda_event and cognitoTriggerSpan is not None:
+                    try:
+                        if isinstance(result, dict) and result.get("statusCode"):
+                            cognitoTriggerSpan.set_attribute(
+                                SpanAttributes.HTTP_STATUS_CODE,
+                                result.get("statusCode"),
+                            )
+                        if isinstance(result, dict) and result.get("body"):
+                            cognitoTriggerSpan.set_attribute(
+                                "rpc.response.body",
+                                result.get("body"),
+                            )
+                    except Exception:
+                        pass
+                    cognitoTriggerSpan.end()  
+                    
+            now = time.time()
+            _tracer_provider = tracer_provider or get_tracer_provider()
+            if hasattr(_tracer_provider, "force_flush"):
+                try:
+                    # NOTE: `force_flush` before function quit in case of Lambda freeze.
+                    _tracer_provider.force_flush(flush_timeout)
+                except Exception:  # pylint: disable=broad-except
+                    logger.exception("TracerProvider failed to flush traces")
+            else:
+                logger.warning(
+                    "TracerProvider was missing `force_flush` method. This is necessary in case of a Lambda freeze and would exist in the OTel SDK implementation."
+                )
+
+        except Exception as e:
+            if apiGwSpan is not None:
+                apiGwSpan.end()
+            if s3TriggerSpan is not None:
+                s3TriggerSpan.end()
+            if sqsTriggerSpan is not None:
+                sqsTriggerSpan.end()
+            if snsTriggerSpan is not None:
+                snsTriggerSpan.end()
+            if dynamoTriggerSpan is not None:
+                dynamoTriggerSpan.end()
+            if cognitoTriggerSpan is not None:
+                cognitoTriggerSpan.end()
+
+            now = time.time()
+            _tracer_provider = tracer_provider or get_tracer_provider()
+            if hasattr(_tracer_provider, "force_flush"):
+                try:
+                    # NOTE: `force_flush` before function quit in case of Lambda freeze.
+                    _tracer_provider.force_flush(flush_timeout) 
+                except Exception:  # pylint: disable=broad-except
+                    logger.warning(
+                     "TracerProvider was missing `force_flush` method. This is necessary in case of a Lambda freeze and would exist in the OTel SDK implementation."
+                    )
+                    # pass
+
+            raise e
 
         _meter_provider = meter_provider or get_meter_provider()
         if hasattr(_meter_provider, "force_flush"):
@@ -437,9 +747,9 @@ class AwsLambdaInstrumentor(BaseInstrumentor):
             )
 
         disable_aws_context_propagation = kwargs.get(
-            "disable_aws_context_propagation", False
+            "disable_aws_context_propagation", True
         ) or os.getenv(
-            OTEL_LAMBDA_DISABLE_AWS_CONTEXT_PROPAGATION, "False"
+            OTEL_LAMBDA_DISABLE_AWS_CONTEXT_PROPAGATION, "True"
         ).strip().lower() in (
             "true",
             "1",

@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "opentelemetry-instrumentation-aws-lambda"
+name = "opentelemetry-instrumentation-psycopg2-binary"
 dynamic = ["version"]
-description = "OpenTelemetry AWS Lambda instrumentation"
+description = "OpenTelemetry psycopg2 instrumentation"
 readme = "README.rst"
 license = "Apache-2.0"
 requires-python = ">=3.7"
@@ -20,24 +20,34 @@ classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.7",
   "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
 ]
 dependencies = [
+  "opentelemetry-api ~= 1.12",
   "opentelemetry-instrumentation == 0.38b0",
-  "opentelemetry-propagator-aws-xray == 1.0.1",
-  "opentelemetry-semantic-conventions == 0.38b0",
+  "opentelemetry-instrumentation-dbapi == 0.38b0",
+  "opentelemetry-instrumentation-psycopg2 == 0.38b0",
 ]
 
 [project.optional-dependencies]
-instruments = []
+instruments = [
+  "psycopg2-binary >= 2.7.3.1",
+]
 test = [
+  "opentelemetry-instrumentation-psycopg2[instruments]",
   "opentelemetry-test-utils == 0.39b0.dev",
 ]
 
+[project.entry-points.opentelemetry_instrumentor]
+psycopg2 = "opentelemetry.instrumentation.psycopg2.binary:Psycopg2Instrumentor"
+
 [project.urls]
-Homepage = "https://github.com/open-telemetry/opentelemetry-python-contrib/tree/main/instrumentation/opentelemetry-instrumentation-aws-lambda"
+Homepage = "https://github.com/open-telemetry/opentelemetry-python-contrib/tree/main/instrumentation/opentelemetry-instrumentation-psycopg2-binary"
 
 [tool.hatch.version]
-path = "src/opentelemetry/instrumentation/aws_lambda/version.py"
+path = "src/opentelemetry/instrumentation/psycopg2/binary/version.py"
 
 [tool.hatch.build.targets.sdist]
 include = [

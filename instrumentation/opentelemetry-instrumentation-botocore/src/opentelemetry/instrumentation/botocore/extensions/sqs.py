@@ -34,6 +34,10 @@ class _SqsExtension(_AwsSdkExtension):
             attributes["aws.queue_url"] = queue_url
             attributes[SpanAttributes.MESSAGING_SYSTEM] = "aws.sqs"
             attributes[SpanAttributes.MESSAGING_URL] = queue_url
+            payload = self._call_context.params.get("MessageBody")
+            if payload is not None:
+                attributes["rpc.request.payload"] = payload
+
             try:
                 attributes[
                     SpanAttributes.MESSAGING_DESTINATION
