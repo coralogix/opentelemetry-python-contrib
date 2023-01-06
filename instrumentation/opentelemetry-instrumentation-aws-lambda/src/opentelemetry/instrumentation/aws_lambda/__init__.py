@@ -195,6 +195,12 @@ def _set_api_gateway_v1_proxy_attributes(
     )
     span.set_attribute(SpanAttributes.HTTP_ROUTE, lambda_event.get("resource"))
 
+    if lambda_event.get("body"):
+        span.set_attribute(
+            "http.request.body",
+            lambda_event.get("body"),
+        )
+
     if lambda_event.get("headers"):
         span.set_attribute(
             SpanAttributes.HTTP_USER_AGENT,
@@ -229,6 +235,12 @@ def _set_api_gateway_v2_proxy_attributes(
     More info:
     https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-develop-integrations-lambda.html
     """
+    if lambda_event.get("body"):
+        span.set_attribute(
+            "http.request.body",
+            lambda_event.get("body"),
+        )
+
     span.set_attribute(
         SpanAttributes.NET_HOST_NAME,
         lambda_event["requestContext"].get("domainName"),
@@ -345,6 +357,11 @@ def _instrument(
                     span.set_attribute(
                         SpanAttributes.HTTP_STATUS_CODE,
                         result.get("statusCode"),
+                    )
+                if isinstance(result, dict) and result.get("body"):
+                    span.set_attribute(
+                        "http.response.body",
+                        result.get("body"),
                     )
 
         _tracer_provider = tracer_provider or get_tracer_provider()
