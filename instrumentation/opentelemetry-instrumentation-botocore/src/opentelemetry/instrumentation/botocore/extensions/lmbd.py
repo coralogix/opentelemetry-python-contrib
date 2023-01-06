@@ -66,6 +66,8 @@ class _OpInvoke(_LambdaOperation):
             SpanAttributes.FAAS_INVOKED_NAME
         ] = cls._parse_function_name(call_context)
         attributes[SpanAttributes.FAAS_INVOKED_REGION] = call_context.region
+        if call_context.params.get("Payload") is not None:
+            attributes["rpc.request.payload"] = call_context.params.get("Payload")
 
     @classmethod
     def _parse_function_name(cls, call_context: _AwsSdkCallContext):

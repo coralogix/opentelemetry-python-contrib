@@ -79,6 +79,7 @@ for example:
 """
 
 import logging
+import json
 from typing import Any, Callable, Collection, Dict, Optional, Tuple
 
 from botocore.client import BaseClient
@@ -168,7 +169,7 @@ class BotocoreInstrumentor(BaseInstrumentor):
         extension = _find_extension(call_context)
         if not extension.should_trace_service_call():
             return original_func(*args, **kwargs)
-
+        print("before call", call_context.params)
         attributes = {
             SpanAttributes.RPC_SYSTEM: "aws-api",
             SpanAttributes.RPC_SERVICE: call_context.service_id,
@@ -176,6 +177,25 @@ class BotocoreInstrumentor(BaseInstrumentor):
             # TODO: update when semantic conventions exist
             "aws.region": call_context.region,
         }
+        if call_context.operation == "ListObjects":
+            bucket = call_context.params.get("Bucket")
+            if bucket is not None:
+                attributes["rpc.request.payload"] = bucket
+
+        if call_context.operation == "PutObject":
+            body = call_context.params.get("Body")
+            if body is not None:
+                attributes["rpc.request.payload"] = body.decode('utf-8')
+        
+        if call_context.operation == "PutItem":
+            body = call_context.params.get("Item")
+            if body is not None:
+                attributes["rpc.request.payload"] = json.dumps(body)
+
+        if call_context.operation == "GetItem":
+            body = call_context.params.get("Key")
+            if body is not None:
+                attributes["rpc.request.payload"] = json.dumps(body)
 
         _safe_invoke(extension.extract_attributes, attributes)
 
@@ -190,6 +210,7 @@ class BotocoreInstrumentor(BaseInstrumentor):
             token = context_api.attach(
                 context_api.set_value(_SUPPRESS_HTTP_INSTRUMENTATION_KEY, True)
             )
+            print("invoking function", *args, **kwargs)
 
             result = None
             try:
@@ -231,6 +252,7 @@ class BotocoreInstrumentor(BaseInstrumentor):
 
 
 def _apply_response_attributes(span: Span, result):
+    print("apply response attributes", result)
     if result is None or not span.is_recording():
         return
 
@@ -259,6 +281,35 @@ def _apply_response_attributes(span: Span, result):
     status_code = metadata.get("HTTPStatusCode")
     if status_code is not None:
         span.set_attribute(SpanAttributes.HTTP_STATUS_CODE, status_code)
+
+    headers = metadata.get("HTTPHeaders")
+    if headers is not None:
+        print("headers", headers)
+        server = headers.get("server")
+        print("server2", server)
+        if server == "AmazonS3":
+            # TODO this is list endpoint gets and puts too!
+            buckets = result.get("Buckets")
+            content = result.get("Contents")
+            body = result.get("Body")
+            if buckets is not None:
+                span.set_attribute(
+                    "rpc.response.payload", json.dumps([b.get("Name") for b in buckets]))
+            elif content is not None:
+                print("content", content)
+                span.set_attribute(
+                    "rpc.response.payload", json.dumps([b.get("Key") for b in content]))
+            #elif body is not None:
+                # botocore.response.StreamingBody
+            #   span.set_attribute(
+            #        "rpc.response.payload", "GetObject")
+        # TODO breaks tracing?
+        #if server == "Server":
+        #    item = result.get("Item")
+        #    if item is not None:
+        #        span.set_attribute(
+        #            "rpc.response.payload", json.dumps(item)
+
 
 
 def _determine_call_context(

@@ -92,6 +92,7 @@ from opentelemetry.trace import (
     TracerProvider,
     get_tracer,
     get_tracer_provider,
+    set_span_in_context
 )
 from opentelemetry.trace.propagation import get_current_span
 
@@ -200,6 +201,12 @@ def _set_api_gateway_v1_proxy_attributes(
     )
     span.set_attribute(SpanAttributes.HTTP_ROUTE, lambda_event.get("resource"))
 
+    if lambda_event.get("body"):
+        span.set_attribute(
+            "http.request.body",
+            lambda_event.get("body"),
+        )
+
     if lambda_event.get("headers"):
         span.set_attribute(
             SpanAttributes.HTTP_USER_AGENT,
@@ -234,6 +241,12 @@ def _set_api_gateway_v2_proxy_attributes(
     More info:
     https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-develop-integrations-lambda.html
     """
+    if lambda_event.get("body"):
+        span.set_attribute(
+            "http.request.body",
+            lambda_event.get("body"),
+        )
+
     span.set_attribute(
         SpanAttributes.NET_HOST_NAME,
         lambda_event["requestContext"].get("domainName"),
@@ -304,12 +317,28 @@ def _instrument(
                 # https://docs.aws.amazon.com/AmazonS3/latest/userguide/notification-content-structure.html
                 # https://docs.aws.amazon.com/lambda/latest/dg/with-ddb.html
                 span_kind = SpanKind.CONSUMER
+
             else:
                 span_kind = SpanKind.SERVER
         except (IndexError, KeyError, TypeError):
             span_kind = SpanKind.SERVER
 
         tracer = get_tracer(__name__, __version__, tracer_provider)
+
+        print(lambda_event)
+
+        apiGwSpan = None
+        if lambda_event and lambda_event.get("requestContext"):
+
+            span_name = orig_handler_name
+            if lambda_event.get("resource"):
+                span_name = lambda_event.get("resource")
+            if lambda_event.get("requestContext") and lambda_event["requestContext"].get("http"):
+                span_name = lambda_event["requestContext"]["http"].get("path")
+            
+            apiGwSpan = tracer.start_span(span_name, context=parent_context, kind=span_kind)
+            parent_context = set_span_in_context(apiGwSpan)
+
 
         with tracer.start_as_current_span(
             name=orig_handler_name,
@@ -338,19 +367,43 @@ def _instrument(
             # If the request came from an API Gateway, extract http attributes from the event
             # https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/semantic_conventions/instrumentation/aws-lambda.md#api-gateway
             # https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/semantic_conventions/http.md#http-server-semantic-conventions
-            if lambda_event and lambda_event.get("requestContext"):
-                span.set_attribute(SpanAttributes.FAAS_TRIGGER, "http")
+            if lambda_event and lambda_event.get("requestContext") and apiGwSpan is not None:
+                apiGwSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "http")
 
                 if lambda_event.get("version") == "2.0":
-                    _set_api_gateway_v2_proxy_attributes(lambda_event, span)
+                    _set_api_gateway_v2_proxy_attributes(lambda_event, apiGwSpan)
                 else:
-                    _set_api_gateway_v1_proxy_attributes(lambda_event, span)
+                    _set_api_gateway_v1_proxy_attributes(lambda_event, apiGwSpan)
 
                 if isinstance(result, dict) and result.get("statusCode"):
-                    span.set_attribute(
+                    apiGwSpan.set_attribute(
                         SpanAttributes.HTTP_STATUS_CODE,
                         result.get("statusCode"),
                     )
+                if isinstance(result, dict) and result.get("body"):
+                    apiGwSpan.set_attribute(
+                        "http.response.body",
+                        result.get("body"),
+                    )
+                if lambda_event.get("headers"):
+                    for key, value in lambda_event.get("headers").items():
+                        apiGwSpan.set_attribute("http.request.header." + key.lower().replace("-", "_"), value)
+
+                if lambda_event["requestContext"].get("domainName") and lambda_event["requestContext"].get("http") and lambda_event["requestContext"].get("http").get("path"):
+                    apiGwSpan.set_attribute(
+                        SpanAttributes.HTTP_URL,
+                        lambda_event["requestContext"].get("domainName") + lambda_event["requestContext"].get("http").get("path")
+                    )
+                apiGwSpan.end()
+            try:
+                if lambda_event["Records"][0]["eventSource"] == "aws:sqs":
+                    span.set_attribute(SpanAttributes.FAAS_TRIGGER, "pubsub")
+                    span.set_attribute("messaging.message",
+                                       lambda_event["Records"])
+            except Exception:
+                logger.error(
+                    "TracerProvider was missing `force_flush` method. This is necessary in case of a Lambda freeze and would exist in the OTel SDK implementation."
+                )
 
         _tracer_provider = tracer_provider or get_tracer_provider()
         try:
@@ -414,9 +467,9 @@ class AwsLambdaInstrumentor(BaseInstrumentor):
             )
 
         disable_aws_context_propagation = kwargs.get(
-            "disable_aws_context_propagation", False
+            "disable_aws_context_propagation", True
         ) or os.getenv(
-            OTEL_LAMBDA_DISABLE_AWS_CONTEXT_PROPAGATION, "False"
+            OTEL_LAMBDA_DISABLE_AWS_CONTEXT_PROPAGATION, "True"
         ).strip().lower() in (
             "true",
             "1",
