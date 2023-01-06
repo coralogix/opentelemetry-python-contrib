@@ -79,11 +79,15 @@ for example:
 """
 
 import logging
+import json
+import io
+import os
 from typing import Any, Callable, Collection, Dict, Optional, Tuple
 
 from botocore.client import BaseClient
 from botocore.endpoint import Endpoint
 from botocore.exceptions import ClientError
+from botocore.response import StreamingBody
 from wrapt import wrap_function_wrapper
 
 from opentelemetry import context as context_api
@@ -105,8 +109,19 @@ from opentelemetry.propagators.aws.aws_xray_propagator import AwsXRayPropagator
 from opentelemetry.semconv.trace import SpanAttributes
 from opentelemetry.trace import get_tracer
 from opentelemetry.trace.span import Span
-
+import copy
+import base64
+import traceback
 logger = logging.getLogger(__name__)
+
+
+# pylint: disable=unused-argument
+def _patched_endpoint_prepare_request(wrapped, instance, args, kwargs):
+    request = args[0]
+    headers = request.headers
+    inject(headers)
+
+    return wrapped(*args, **kwargs)
 
 
 class BotocoreInstrumentor(BaseInstrumentor):
@@ -119,7 +134,7 @@ class BotocoreInstrumentor(BaseInstrumentor):
         super().__init__()
         self.request_hook = None
         self.response_hook = None
-        self.propagator = AwsXRayPropagator()
+        self.payload_size_limit = 51200
 
     def instrumentation_dependencies(self) -> Collection[str]:
         return _instruments
@@ -132,11 +147,12 @@ class BotocoreInstrumentor(BaseInstrumentor):
 
         self.request_hook = kwargs.get("request_hook")
         self.response_hook = kwargs.get("response_hook")
-
-        propagator = kwargs.get("propagator")
-        if propagator is not None:
-            self.propagator = propagator
-
+        try:
+            self.payload_size_limit = int(os.environ.get("OTEL_PAYLOAD_SIZE_LIMIT", 204800))
+        except ValueError:
+            logger.error(
+                "OTEL_PAYLOAD_SIZE_LIMIT is not a number"
+            )
         wrap_function_wrapper(
             "botocore.client",
             "BaseClient._make_api_call",
@@ -171,14 +187,27 @@ class BotocoreInstrumentor(BaseInstrumentor):
         if context_api.get_value(_SUPPRESS_INSTRUMENTATION_KEY):
             return original_func(*args, **kwargs)
 
+        #print("patched_api")
+        #print(json.dumps(instance, indent=4, sort_keys=True, default=str))
+        #print("args")
+        #print(args)
+        #print(json.dumps(args, indent=4, sort_keys=True, default=str))
+        #print("kwargs")
+        #print(kwargs)
+        #print(json.dumps(kwargs, indent=4, sort_keys=True, default=str))
+
         call_context = _determine_call_context(instance, args)
         if call_context is None:
             return original_func(*args, **kwargs)
 
+        #print("parsing context")
+        #print(call_context.service)
+        #print(call_context.operation)
+        #print(args[1].get("ClientContext"))
+
         extension = _find_extension(call_context)
         if not extension.should_trace_service_call():
             return original_func(*args, **kwargs)
-
         attributes = {
             SpanAttributes.RPC_SYSTEM: "aws-api",
             SpanAttributes.RPC_SERVICE: call_context.service_id,
@@ -186,7 +215,35 @@ class BotocoreInstrumentor(BaseInstrumentor):
             # TODO: update when semantic conventions exist
             "aws.region": call_context.region,
         }
+        try:
+            if call_context.operation == "ListObjects":
+                bucket = call_context.params.get("Bucket")
+                if bucket is not None:
+                    attributes["rpc.request.payload"] = bucket
+            elif call_context.operation == "PutObject":
+                body = call_context.params.get("Body")
+                if body is not None:
+                    attributes["rpc.request.payload"] = body.decode('ascii')
+            elif call_context.operation == "PutItem":
+                body = call_context.params.get("Item")
+                if body is not None:
+                    attributes["rpc.request.payload"] = json.dumps(body, default=str)
+            elif call_context.operation == "GetItem":
+                body = call_context.params.get("Key")
+                if body is not None:
+                    attributes["rpc.request.payload"] = json.dumps(body, default=str)
+            elif call_context.operation == "Publish":
+                body = call_context.params.get("Message")
+                if body is not None:
+                    attributes["rpc.request.payload"] = json.dumps(body, default=str)
+            else:
+                attributes["rpc.request.payload"] = json.dumps(call_context.params, default=str)
+        except Exception as ex:
+            pass
 
+        #print("here")
+        #print(call_context.operation)
+        #print(json.dumps(call_context.params, indent=4, sort_keys=True, default=str))
         _safe_invoke(extension.extract_attributes, attributes)
 
         with self._tracer.start_as_current_span(
@@ -201,16 +258,40 @@ class BotocoreInstrumentor(BaseInstrumentor):
                 context_api.set_value(_SUPPRESS_HTTP_INSTRUMENTATION_KEY, True)
             )
 
+            try:
+                if call_context.service == "lambda" and call_context.operation == "Invoke":
+                    if args[1].get("ClientContext") is not None:
+                        ctx = base64.b64decode(args[1].get("ClientContext")).decode('ascii')
+                        inject(ctx['custom'])
+                        jctx = json.dumps(ctx)
+                        args[1]['ClientContext'] = base64.b64encode(jctx.encode('ascii')).decode('ascii')
+                    else:
+                        #ctx = {'custom': {'traceContext':{}}}
+                        #inject(ctx['custom']['traceContext'])
+                        ctx = {'custom': {}}
+                        inject(ctx['custom'])
+                        jctx = json.dumps(ctx)
+                        args[1]['ClientContext'] = base64.b64encode(jctx.encode('ascii')).decode('ascii')
+
+            except Exception as ex:
+                #print(traceback.format_exc())
+                #print("exception")
+                #print(ex)
+                pass
+
             result = None
             try:
+                #print("calling original func")
+                #print(json.dumps(args, indent=4, sort_keys=True, default=str))
+
                 result = original_func(*args, **kwargs)
             except ClientError as error:
                 result = getattr(error, "response", None)
-                _apply_response_attributes(span, result)
+                _apply_response_attributes(span, result, self.payload_size_limit)
                 _safe_invoke(extension.on_error, span, error)
                 raise
             else:
-                _apply_response_attributes(span, result)
+                _apply_response_attributes(span, result, self.payload_size_limit)
                 _safe_invoke(extension.on_success, span, result)
             finally:
                 context_api.detach(token)
@@ -240,7 +321,7 @@ class BotocoreInstrumentor(BaseInstrumentor):
         )
 
 
-def _apply_response_attributes(span: Span, result):
+def _apply_response_attributes(span: Span, result, payload_size_limit):
     if result is None or not span.is_recording():
         return
 
@@ -270,11 +351,71 @@ def _apply_response_attributes(span: Span, result):
     if status_code is not None:
         span.set_attribute(SpanAttributes.HTTP_STATUS_CODE, status_code)
 
+    #print("result")
+    #print(json.dumps(result, indent=4, sort_keys=True, default=str))
+    #print(json.dumps(metadata, indent=4, sort_keys=True, default=str))
+    try:
+        headers = metadata.get("HTTPHeaders")
+        if headers is not None:
+            server = headers.get("server")
+            if server == "AmazonS3":
+                buckets = result.get("Buckets")
+                content = result.get("Contents")
+                body = result.get("Body")
+                if buckets is not None:
+                    span.set_attribute(
+                        "rpc.response.payload", json.dumps([b.get("Name") for b in buckets]))
+                elif content is not None:
+                    span.set_attribute(
+                        "rpc.response.payload", json.dumps([b.get("Key") for b in content]))
+                elif body is not None:
+                    pass
+                else:
+                    span.set_attribute(
+                        "rpc.response.payload", json.dumps(result, default=str))
+                #elif body is not None:
+                #    try:
+                #        d = {x: result[x] for x in result if x != "Body"}
+                #        payload = copy.deepcopy(d)
+                #        if body._content_length is not None and int(body._content_length) < payload_size_limit:
+                #            strbody = body.read()
+                #            payload['Body'] = strbody1
+                #            body.close()
+                #            result['Body'] = StreamingBody(io.BytesIO(strbody),
+                #                                           content_length=body._content_length)
+                #        else:
+                #            payload['Body'] = ''
+                #        span.set_attribute(
+                #            "rpc.response.payload", json.dumps(payload, default=str))
+                #    except Exception as ex:
+                #        pass
+            # Lambda Invoke
+            elif result.get("Payload") is not None and result.get("Payload")._content_length is not None and int(result.get("Payload")._content_length) < payload_size_limit:
+                length = result.get("Payload")._content_length
+                strbody = result.get("Payload").read()
+                result.get("Payload").close()
+                span.set_attribute(
+                    "rpc.response.payload", strbody)
+                result['Payload'] = StreamingBody(io.BytesIO(strbody), content_length=length)
+            # DynamoDB get item
+            elif server == "Server":
+                span.set_attribute(
+                    "rpc.response.payload", json.dumps(result, default=str))
+            else:
+                span.set_attribute(
+                    "rpc.response.payload", json.dumps(result, default=str))
+    except Exception as ex:
+        #print(traceback.format_exc())
+        #print("exception")
+        #print(ex)
+        pass
+
 
 def _determine_call_context(
     client: BaseClient, args: Tuple[str, Dict[str, Any]]
 ) -> Optional[_AwsSdkCallContext]:
     try:
+
         call_context = _AwsSdkCallContext(client, args)
 
         logger.debug(
