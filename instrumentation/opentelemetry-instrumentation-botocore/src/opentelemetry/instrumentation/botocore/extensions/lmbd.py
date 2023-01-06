@@ -66,6 +66,8 @@ class _OpInvoke(_LambdaOperation):
             SpanAttributes.FAAS_INVOKED_NAME
         ] = cls._parse_function_name(call_context)
         attributes[SpanAttributes.FAAS_INVOKED_REGION] = call_context.region
+        if call_context.params.get("Payload") is not None:
+            attributes["rpc.request.body"] = call_context.params.get("Payload")
 
     @classmethod
     def _parse_function_name(cls, call_context: _AwsSdkCallContext):
@@ -84,7 +86,7 @@ class _OpInvoke(_LambdaOperation):
         if payload_str is None:
             return
 
-        # TODO: reconsider propagation via payload as it manipulates input of the called lambda function
+        # TODO: reconsider propagation via paylodeepad as it manipulates input of the called lambda function
         try:
             payload = json.loads(payload_str)
             headers = payload.get("headers", {})
@@ -93,7 +95,6 @@ class _OpInvoke(_LambdaOperation):
             call_context.params["Payload"] = json.dumps(payload)
         except ValueError:
             pass
-
 
 ################################################################################
 # Lambda extension
