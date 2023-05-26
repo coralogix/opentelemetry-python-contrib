@@ -389,7 +389,7 @@ def _instrument(
                     span_name = lambda_event["Records"][0].get("eventName")
 
                 s3TriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.PRODUCER)
-                s3TriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "s3")
+                s3TriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "datasource")
                 s3TriggerSpan.set_attribute("faas.trigger.type", "S3")
 
                 parent_context = set_span_in_context(s3TriggerSpan)
@@ -409,7 +409,7 @@ def _instrument(
             }:
                 span_name = orig_handler_name
                 sqsTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.PRODUCER)
-                sqsTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "sqs")
+                sqsTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "pubsub")
                 sqsTriggerSpan.set_attribute("faas.trigger.type", "SQS")
 
                 parent_context = set_span_in_context(sqsTriggerSpan)
@@ -428,7 +428,7 @@ def _instrument(
                 span_kind = SpanKind.CONSUMER
                 span_name = orig_handler_name
                 snsTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.PRODUCER)
-                snsTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "sns")
+                snsTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "pubsub")
                 snsTriggerSpan.set_attribute("faas.trigger.type", "SNS")
 
                 parent_context = set_span_in_context(snsTriggerSpan)
@@ -449,7 +449,7 @@ def _instrument(
                     span_name = lambda_event["Records"][0].get("eventName")
 
                 dynamoTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.PRODUCER)
-                dynamoTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "dynamodb")
+                dynamoTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "datasource")
                 dynamoTriggerSpan.set_attribute("faas.trigger.type", "Dynamo DB")
 
                 parent_context = set_span_in_context(dynamoTriggerSpan)
@@ -470,7 +470,7 @@ def _instrument(
                     span_name = lambda_event.get("eventType") 
 
                 cognitoTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.PRODUCER)
-                cognitoTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "cognito")
+                cognitoTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "other")
                 cognitoTriggerSpan.set_attribute("faas.trigger.type", "Cognito")
 
                 parent_context = set_span_in_context(cognitoTriggerSpan)
