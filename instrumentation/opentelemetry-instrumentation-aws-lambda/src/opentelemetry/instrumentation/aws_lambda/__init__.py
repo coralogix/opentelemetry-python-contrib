@@ -470,7 +470,7 @@ def _instrument(
                     span_name = lambda_event.get("eventType") 
 
                 cognitoTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.PRODUCER)
-                cognitoTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "other")
+                cognitoTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "datasource")
                 cognitoTriggerSpan.set_attribute("faas.trigger.type", "Cognito")
 
                 parent_context = set_span_in_context(cognitoTriggerSpan)
