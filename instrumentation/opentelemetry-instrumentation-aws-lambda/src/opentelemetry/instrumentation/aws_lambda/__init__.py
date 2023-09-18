@@ -87,18 +87,22 @@ from opentelemetry.propagators.aws.aws_xray_propagator import (
     TRACE_HEADER_KEY,
     AwsXRayPropagator,
 )
+from opentelemetry.propagators import textmap
 from opentelemetry.semconv.resource import ResourceAttributes
 from opentelemetry.semconv.trace import SpanAttributes
 from opentelemetry.trace import (
     Span,
     SpanKind,
+    Link,
     TracerProvider,
+    get_current_span,
     get_tracer,
     get_tracer_provider,
     set_span_in_context
 )
 from opentelemetry.trace.propagation import get_current_span
 import json
+import typing
 #import traceback
 #import tracemalloc
 
@@ -407,8 +411,15 @@ def _instrument(
             if lambda_event["Records"][0]["eventSource"] in {
                 "aws:sqs",
             }:
+                links = []
+                for record in lambda_event["Records"]:
+                    attributes = record.get("messageAttributes")
+                    if attributes is not None:
+                        ctx = get_global_textmap().extract(carrier=attributes, getter=SQSGetter())
+                        links.append(Link(get_current_span(ctx).get_span_context()))
+
                 span_name = orig_handler_name
-                sqsTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.PRODUCER)
+                sqsTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.PRODUCER, links=links)
                 sqsTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "pubsub")
                 sqsTriggerSpan.set_attribute("faas.trigger.type", "SQS")
 
@@ -418,7 +429,8 @@ def _instrument(
                     sqsTriggerSpan.set_attribute(
                         "rpc.request.body",
                         lambda_event["Records"][0].get("body"),
-                    )    
+                    )
+
         except Exception as ex:
             pass
 
@@ -773,3 +785,29 @@ class AwsLambdaInstrumentor(BaseInstrumentor):
             import_module(self._wrapped_module_name),
             self._wrapped_function_name,
         )
+
+
+class SQSGetter():
+    def get(
+        self, carrier: typing.Mapping[str, textmap.CarrierValT], key: str
+    ) -> typing.Optional[typing.List[str]]:
+        """Getter implementation to retrieve a value from a dictionary.
+
+        Args:
+            carrier: dictionary in which to get value
+            key: the key used to get the value
+        Returns:
+            A list with a single string with the value if it exists, else None.
+        """
+        val = carrier.get(key, None)
+        if val is None:
+            return None
+        if val.get("stringValue") is not None:
+            return [val.get("stringValue")]
+        return None
+
+    def keys(
+        self, carrier: typing.Mapping[str, textmap.CarrierValT]
+    ) -> typing.List[str]:
+        """Keys implementation that returns all keys from a dictionary."""
+        return list(carrier.keys())
