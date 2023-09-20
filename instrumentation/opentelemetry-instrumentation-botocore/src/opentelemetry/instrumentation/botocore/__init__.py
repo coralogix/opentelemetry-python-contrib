@@ -105,13 +105,13 @@ from opentelemetry.instrumentation.utils import (
     _SUPPRESS_INSTRUMENTATION_KEY,
     unwrap,
 )
-from opentelemetry.propagators.aws.aws_xray_propagator import AwsXRayPropagator
+from opentelemetry.propagate import inject
+from opentelemetry.propagators import textmap
 from opentelemetry.semconv.trace import SpanAttributes
 from opentelemetry.trace import get_tracer
 from opentelemetry.trace.span import Span
-import copy
 import base64
-import traceback
+import typing
 logger = logging.getLogger(__name__)
 
 
@@ -148,7 +148,7 @@ class BotocoreInstrumentor(BaseInstrumentor):
         self.request_hook = kwargs.get("request_hook")
         self.response_hook = kwargs.get("response_hook")
         try:
-            self.payload_size_limit = int(os.environ.get("OTEL_PAYLOAD_SIZE_LIMIT", 204800))
+            self.payload_size_limit = int(os.environ.get("OTEL_PAYLOAD_SIZE_LIMIT", 51200))
         except ValueError:
             logger.error(
                 "OTEL_PAYLOAD_SIZE_LIMIT is not a number"
@@ -200,11 +200,6 @@ class BotocoreInstrumentor(BaseInstrumentor):
         if call_context is None:
             return original_func(*args, **kwargs)
 
-        #print("parsing context")
-        #print(call_context.service)
-        #print(call_context.operation)
-        #print(args[1].get("ClientContext"))
-
         extension = _find_extension(call_context)
         if not extension.should_trace_service_call():
             return original_func(*args, **kwargs)
@@ -223,21 +218,21 @@ class BotocoreInstrumentor(BaseInstrumentor):
             elif call_context.operation == "PutObject":
                 body = call_context.params.get("Body")
                 if body is not None:
-                    attributes["rpc.request.payload"] = body.decode('ascii')
+                    attributes["rpc.request.payload"] = limit_string_size(self.payload_size_limit, body.decode('ascii'))
             elif call_context.operation == "PutItem":
                 body = call_context.params.get("Item")
                 if body is not None:
-                    attributes["rpc.request.payload"] = json.dumps(body, default=str)
+                    attributes["rpc.request.payload"] = limit_string_size(self.payload_size_limit, json.dumps(body, default=str))
             elif call_context.operation == "GetItem":
                 body = call_context.params.get("Key")
                 if body is not None:
-                    attributes["rpc.request.payload"] = json.dumps(body, default=str)
+                    attributes["rpc.request.payload"] = limit_string_size(self.payload_size_limit,json.dumps(body, default=str))
             elif call_context.operation == "Publish":
                 body = call_context.params.get("Message")
                 if body is not None:
-                    attributes["rpc.request.payload"] = json.dumps(body, default=str)
+                    attributes["rpc.request.payload"] = limit_string_size(self.payload_size_limit,json.dumps(body, default=str))
             else:
-                attributes["rpc.request.payload"] = json.dumps(call_context.params, default=str)
+                attributes["rpc.request.payload"] = limit_string_size(self.payload_size_limit, json.dumps(call_context.params, default=str))
         except Exception as ex:
             pass
 
@@ -266,18 +261,33 @@ class BotocoreInstrumentor(BaseInstrumentor):
                         jctx = json.dumps(ctx)
                         args[1]['ClientContext'] = base64.b64encode(jctx.encode('ascii')).decode('ascii')
                     else:
-                        #ctx = {'custom': {'traceContext':{}}}
-                        #inject(ctx['custom']['traceContext'])
                         ctx = {'custom': {}}
                         inject(ctx['custom'])
                         jctx = json.dumps(ctx)
                         args[1]['ClientContext'] = base64.b64encode(jctx.encode('ascii')).decode('ascii')
 
             except Exception as ex:
-                #print(traceback.format_exc())
-                #print("exception")
-                #print(ex)
                 pass
+
+            try:
+                if call_context.service == "sqs" and call_context.operation == "SendMessage":
+                    if args[1].get("MessageAttributes") is not None:
+                        inject(carrier = args[1].get("MessageAttributes"), setter=SQSSetter())
+                    else:
+                        args[1]['MessageAttributes'] = {}
+                        inject(carrier = args[1].get("MessageAttributes"), setter=SQSSetter())
+                
+                if call_context.service == "sqs" and call_context.operation == "SendMessageBatch":
+                    if args[1].get("Entries") is not None:
+                        for entry in args[1].get("Entries"):
+                            if entry.get("MessageAttributes") is not None:
+                                inject(carrier = entry.get("MessageAttributes"), setter=SQSSetter())
+                            else:
+                                entry['MessageAttributes'] = {}
+                                inject(carrier = entry.get("MessageAttributes"), setter=SQSSetter())
+                            
+            except Exception as ex:
+                pass 
 
             result = None
             try:
@@ -405,9 +415,6 @@ def _apply_response_attributes(span: Span, result, payload_size_limit):
                 span.set_attribute(
                     "rpc.response.payload", json.dumps(result, default=str))
     except Exception as ex:
-        #print(traceback.format_exc())
-        #print("exception")
-        #print(ex)
         pass
 
 
@@ -441,3 +448,27 @@ def _safe_invoke(function: Callable, *args):
         logger.error(
             "Error when invoking function '%s'", function_name, exc_info=ex
         )
+
+class SQSSetter():
+    def set(
+        self,
+        carrier: typing.MutableMapping[str, textmap.CarrierValT],
+        key: str,
+        value: textmap.CarrierValT,
+    ) -> None:
+        """Setter implementation to set a value into a dictionary.
+
+        Args:
+            carrier: dictionary in which to set value
+            key: the key used to set the value
+            value: the value to set
+        """
+        val = {"DataType": "String", "StringValue": value}
+        carrier[key] = val
+
+def limit_string_size(s: str, max_size: int) -> str:
+    if len(s) > max_size:
+        return s[:max_size]
+    else:
+        return s
+
