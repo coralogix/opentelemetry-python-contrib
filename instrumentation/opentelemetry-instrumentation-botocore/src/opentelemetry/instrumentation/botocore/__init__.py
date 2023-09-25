@@ -105,7 +105,7 @@ from opentelemetry.instrumentation.utils import (
 from opentelemetry.propagate import inject
 from opentelemetry.propagators import textmap
 from opentelemetry.semconv.trace import SpanAttributes
-from opentelemetry.trace import get_tracer
+from opentelemetry.trace import get_tracer, SpanKind
 from opentelemetry.trace.span import Span
 import base64
 import typing
@@ -232,6 +232,8 @@ class BotocoreInstrumentor(BaseInstrumentor):
                 body = call_context.params.get("Message")
                 if body is not None:
                     attributes["rpc.request.payload"] = limit_string_size(self.payload_size_limit,json.dumps(body, default=str))
+            elif call_context.service == "events" and call_context.operation == "PutEvents":
+                call_context.span_kind = SpanKind.PRODUCER
             else:
                 attributes["rpc.request.payload"] = limit_string_size(self.payload_size_limit, json.dumps(call_context.params, default=str))
         except Exception as ex:
@@ -288,7 +290,23 @@ class BotocoreInstrumentor(BaseInstrumentor):
                                 inject(carrier = entry.get("MessageAttributes"), setter=SQSSetter())
                             
             except Exception as ex:
-                pass 
+                pass
+
+            try:
+                if call_context.service == "events" and call_context.operation == "PutEvents":
+                    if args[1].get("Entries") is not None:
+                        for entry in args[1].get("Entries"):
+                            if entry.get("Detail") is not None:
+                                detailJson = json.loads(entry.get("Detail"))
+                                detailJson['_context'] = {}
+                                inject(carrier = detailJson['_context'])
+                                entry['Detail'] = json.dumps(detailJson)
+                            else:
+                                detailJson = {'_context': {}}
+                                inject(carrier = detailJson['_context'])
+                                entry['Detail'] = json.dumps(detailJson)
+            except Exception as ex:
+                pass
 
             result = None
             try:
