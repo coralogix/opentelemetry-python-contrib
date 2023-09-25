@@ -197,6 +197,12 @@ will replace the value of headers such as ``session-id`` and ``set-cookie`` with
 Note:
     The environment variable names used to capture HTTP headers are still experimental, and thus are subject to change.
 
+Sanitizing methods
+******************
+In order to prevent unbound cardinality for HTTP methods by default nonstandard ones are labeled as ``NONSTANDARD``.
+To record all of the names set the environment variable  ``OTEL_PYTHON_INSTRUMENTATION_HTTP_CAPTURE_ALL_METHODS``
+to a value that evaluates to true, e.g. ``1``.
+
 API
 ---
 """
@@ -226,6 +232,7 @@ from opentelemetry.util.http import (
     normalise_request_header_name,
     normalise_response_header_name,
     remove_url_credentials,
+    sanitize_method,
 )
 
 _HTTP_VERSION_PREFIX = "HTTP/"
@@ -291,10 +298,11 @@ def setifnotnone(dic, key, value):
 
 def collect_request_attributes(environ):
     """Collects HTTP request attributes from the PEP3333-conforming
-    WSGI environ and returns a dictionary to be used as span creation attributes."""
+    WSGI environ and returns a dictionary to be used as span creation attributes.
+    """
 
     result = {
-        SpanAttributes.HTTP_METHOD: environ.get("REQUEST_METHOD"),
+        SpanAttributes.HTTP_METHOD: sanitize_method(environ.get("REQUEST_METHOD")),
         SpanAttributes.HTTP_SERVER_NAME: environ.get("SERVER_NAME"),
         SpanAttributes.HTTP_SCHEME: environ.get("wsgi.url_scheme"),
     }
@@ -340,7 +348,8 @@ def collect_request_attributes(environ):
 def collect_custom_request_headers_attributes(environ):
     """Returns custom HTTP request headers which are configured by the user
     from the PEP3333-conforming WSGI environ to be used as span creation attributes as described
-    in the specification https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/semantic_conventions/http.md#http-request-and-response-headers"""
+    in the specification https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/semantic_conventions/http.md#http-request-and-response-headers
+    """
 
     sanitize = SanitizeValue(
         get_custom_headers(
@@ -366,7 +375,8 @@ def collect_custom_request_headers_attributes(environ):
 def collect_custom_response_headers_attributes(response_headers):
     """Returns custom HTTP response headers which are configured by the user from the
     PEP3333-conforming WSGI environ as described in the specification
-    https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/semantic_conventions/http.md#http-request-and-response-headers"""
+    https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/semantic_conventions/http.md#http-request-and-response-headers
+    """
 
     sanitize = SanitizeValue(
         get_custom_headers(
@@ -414,7 +424,8 @@ def add_response_attributes(
     span, start_response_status, response_headers
 ):  # pylint: disable=unused-argument
     """Adds HTTP response attributes to span using the arguments
-    passed to a PEP3333-conforming start_response callable."""
+    passed to a PEP3333-conforming start_response callable.
+    """
     if not span.is_recording():
         return
     status_code, _ = start_response_status.split(" ", 1)
@@ -436,8 +447,21 @@ def add_response_attributes(
 
 
 def get_default_span_name(environ):
-    """Default implementation for name_callback, returns HTTP {METHOD_NAME}."""
-    return f"HTTP {environ.get('REQUEST_METHOD', '')}".strip()
+    """
+    Default span name is the HTTP method and URL path, or just the method.
+    https://github.com/open-telemetry/opentelemetry-specification/pull/3165
+    https://opentelemetry.io/docs/reference/specification/trace/semantic_conventions/http/#name
+
+    Args:
+        environ: The WSGI environ object.
+    Returns:
+        The span name.
+    """
+    method = sanitize_method(environ.get("REQUEST_METHOD", "").strip())
+    path = environ.get("PATH_INFO", "").strip()
+    if method and path:
+        return f"{method} {path}"
+    return method
 
 
 class OpenTelemetryMiddleware:

@@ -1,6 +1,8 @@
 from logging import getLogger
 from typing import List, Optional
 
+from opentelemetry import context, propagate
+from opentelemetry.trace import SpanKind, Link
 from opentelemetry.propagators import textmap
 from opentelemetry.semconv.trace import (
     MessagingDestinationKindValues,
@@ -41,16 +43,26 @@ class KafkaContextGetter(textmap.Getter):
     def get(self, carrier: textmap.CarrierT, key: str) -> Optional[List[str]]:
         if carrier is None:
             return None
-        for item_key, value in carrier:
+
+        carrier_items = carrier
+        if isinstance(carrier, dict):
+            carrier_items = carrier.items()
+
+        for item_key, value in carrier_items:
             if item_key == key:
                 if value is not None:
                     return [value.decode()]
+
         return None
 
     def keys(self, carrier: textmap.CarrierT) -> List[str]:
         if carrier is None:
             return []
-        return [key for (key, value) in carrier]
+
+        carrier_items = carrier
+        if isinstance(carrier, dict):
+            carrier_items = carrier.items()
+        return [key for (key, value) in carrier_items]
 
 
 class KafkaContextSetter(textmap.Setter):
@@ -60,10 +72,43 @@ class KafkaContextSetter(textmap.Setter):
 
         if value:
             value = value.encode()
-        carrier.append((key, value))
+
+        if isinstance(carrier, list):
+            carrier.append((key, value))
+
+        if isinstance(carrier, dict):
+            carrier[key] = value
 
 
 _kafka_getter = KafkaContextGetter()
+
+
+def _end_current_consume_span(instance):
+    context.detach(instance._current_context_token)
+    instance._current_context_token = None
+    instance._current_consume_span.end()
+    instance._current_consume_span = None
+
+
+def _create_new_consume_span(instance, tracer, records):
+    links = _get_links_from_records(records)
+    instance._current_consume_span = tracer.start_span(
+        name=f"{records[0].topic()} process",
+        links=links,
+        kind=SpanKind.CONSUMER,
+    )
+
+
+def _get_links_from_records(records):
+    links = []
+    for record in records:
+        ctx = propagate.extract(record.headers(), getter=_kafka_getter)
+        if ctx:
+            for item in ctx.values():
+                if hasattr(item, "get_span_context"):
+                    links.append(Link(context=item.get_span_context()))
+
+    return links
 
 
 def _enrich_span(
@@ -73,14 +118,13 @@ def _enrich_span(
     offset: Optional[int] = None,
     operation: Optional[MessagingOperationValues] = None,
 ):
-
     if not span.is_recording():
         return
 
     span.set_attribute(SpanAttributes.MESSAGING_SYSTEM, "kafka")
     span.set_attribute(SpanAttributes.MESSAGING_DESTINATION, topic)
 
-    if partition:
+    if partition is not None:
         span.set_attribute(SpanAttributes.MESSAGING_KAFKA_PARTITION, partition)
 
     span.set_attribute(
@@ -95,7 +139,7 @@ def _enrich_span(
 
     # https://stackoverflow.com/questions/65935155/identify-and-find-specific-message-in-kafka-topic
     # A message within Kafka is uniquely defined by its topic name, topic partition and offset.
-    if partition and offset and topic:
+    if partition is not None and offset is not None and topic:
         span.set_attribute(
             SpanAttributes.MESSAGING_MESSAGE_ID,
             f"{topic}.{partition}.{offset}",

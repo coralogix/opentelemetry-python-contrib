@@ -15,6 +15,7 @@
 
 from unittest.mock import Mock, patch
 
+from http_server_mock import HttpServerMock
 from tornado.testing import AsyncHTTPTestCase
 
 from opentelemetry import trace
@@ -135,7 +136,7 @@ class TestTornadoInstrumentation(TornadoTest, WsgiTestBase):
         self.assertEqual(manual.parent, server.context)
         self.assertEqual(manual.context.trace_id, client.context.trace_id)
 
-        self.assertEqual(server.name, "MainHandler." + method.lower())
+        self.assertEqual(server.name, f"{method} /")
         self.assertTrue(server.parent.is_remote)
         self.assertNotEqual(server.parent, client.context)
         self.assertEqual(server.parent.span_id, client.context.span_id)
@@ -196,7 +197,7 @@ class TestTornadoInstrumentation(TornadoTest, WsgiTestBase):
         self.assertEqual(len(spans), 5)
 
         client = spans.by_name("GET")
-        server = spans.by_name(handler_name + ".get")
+        server = spans.by_name(f"GET {url}")
         sub_wrapper = spans.by_name("sub-task-wrapper")
 
         sub2 = spans.by_name("sub-task-2")
@@ -213,7 +214,7 @@ class TestTornadoInstrumentation(TornadoTest, WsgiTestBase):
         self.assertEqual(sub_wrapper.parent, server.context)
         self.assertEqual(sub_wrapper.context.trace_id, client.context.trace_id)
 
-        self.assertEqual(server.name, handler_name + ".get")
+        self.assertEqual(server.name, f"GET {url}")
         self.assertTrue(server.parent.is_remote)
         self.assertNotEqual(server.parent, client.context)
         self.assertEqual(server.parent.span_id, client.context.span_id)
@@ -229,6 +230,7 @@ class TestTornadoInstrumentation(TornadoTest, WsgiTestBase):
                 SpanAttributes.HTTP_TARGET: url,
                 SpanAttributes.HTTP_CLIENT_IP: "127.0.0.1",
                 SpanAttributes.HTTP_STATUS_CODE: 201,
+                "tornado.handler": f"tests.tornado_test_app.{handler_name}",
             },
         )
 
@@ -253,9 +255,9 @@ class TestTornadoInstrumentation(TornadoTest, WsgiTestBase):
         self.assertEqual(len(spans), 2)
 
         client = spans.by_name("GET")
-        server = spans.by_name("BadHandler.get")
+        server = spans.by_name("GET /error")
 
-        self.assertEqual(server.name, "BadHandler.get")
+        self.assertEqual(server.name, "GET /error")
         self.assertEqual(server.kind, SpanKind.SERVER)
         self.assertSpanHasAttributes(
             server,
@@ -290,7 +292,7 @@ class TestTornadoInstrumentation(TornadoTest, WsgiTestBase):
         self.assertEqual(len(spans), 2)
         server, client = spans
 
-        self.assertEqual(server.name, "ErrorHandler.get")
+        self.assertEqual(server.name, "GET /missing-url")
         self.assertEqual(server.kind, SpanKind.SERVER)
         self.assertSpanHasAttributes(
             server,
@@ -325,7 +327,7 @@ class TestTornadoInstrumentation(TornadoTest, WsgiTestBase):
         self.assertEqual(len(spans), 2)
         server, client = spans
 
-        self.assertEqual(server.name, "RaiseHTTPErrorHandler.get")
+        self.assertEqual(server.name, "GET /raise_403")
         self.assertEqual(server.kind, SpanKind.SERVER)
         self.assertSpanHasAttributes(
             server,
@@ -366,7 +368,7 @@ class TestTornadoInstrumentation(TornadoTest, WsgiTestBase):
         self.assertEqual(len(spans), 2)
         server, client = spans
 
-        self.assertEqual(server.name, "DynamicHandler.get")
+        self.assertEqual(server.name, "GET /dyna")
         self.assertTrue(server.parent.is_remote)
         self.assertNotEqual(server.parent, client.context)
         self.assertEqual(server.parent.span_id, client.context.span_id)
@@ -400,7 +402,6 @@ class TestTornadoInstrumentation(TornadoTest, WsgiTestBase):
         )
 
     def test_handler_on_finish(self):
-
         response = self.fetch("/on_finish")
         self.assertEqual(response.code, 200)
 
@@ -408,7 +409,7 @@ class TestTornadoInstrumentation(TornadoTest, WsgiTestBase):
         self.assertEqual(len(spans), 3)
         auditor, server, client = spans
 
-        self.assertEqual(server.name, "FinishedHandler.get")
+        self.assertEqual(server.name, "GET /on_finish")
         self.assertTrue(server.parent.is_remote)
         self.assertNotEqual(server.parent, client.context)
         self.assertEqual(server.parent.span_id, client.context.span_id)
@@ -496,9 +497,16 @@ class TestTornadoInstrumentation(TornadoTest, WsgiTestBase):
         set_global_response_propagator(orig)
 
     def test_credential_removal(self):
-        response = self.fetch(
-            "http://username:password@httpbin.org/status/200"
-        )
+        app = HttpServerMock("test_credential_removal")
+
+        @app.route("/status/200")
+        def index():
+            return "hello"
+
+        with app.run("localhost", 5000):
+            response = self.fetch(
+                "http://username:password@localhost:5000/status/200"
+            )
         self.assertEqual(response.code, 200)
 
         spans = self.sorted_spans(self.memory_exporter.get_finished_spans())
@@ -510,7 +518,7 @@ class TestTornadoInstrumentation(TornadoTest, WsgiTestBase):
         self.assertSpanHasAttributes(
             client,
             {
-                SpanAttributes.HTTP_URL: "http://httpbin.org/status/200",
+                SpanAttributes.HTTP_URL: "http://localhost:5000/status/200",
                 SpanAttributes.HTTP_METHOD: "GET",
                 SpanAttributes.HTTP_STATUS_CODE: 200,
             },
@@ -528,7 +536,7 @@ class TestTornadoInstrumentationWithXHeaders(TornadoTest):
         self.assertEqual(response.code, 201)
         spans = self.get_finished_spans()
         self.assertSpanHasAttributes(
-            spans.by_name("MainHandler.get"),
+            spans.by_name("GET /"),
             {
                 SpanAttributes.HTTP_METHOD: "GET",
                 SpanAttributes.HTTP_SCHEME: "http",
@@ -602,7 +610,7 @@ class TestTornadoUninstrument(TornadoTest):
         self.assertEqual(len(spans), 3)
         manual, server, client = self.sorted_spans(spans)
         self.assertEqual(manual.name, "manual")
-        self.assertEqual(server.name, "MainHandler.get")
+        self.assertEqual(server.name, "GET /")
         self.assertEqual(client.name, "GET")
         self.memory_exporter.clear()
 

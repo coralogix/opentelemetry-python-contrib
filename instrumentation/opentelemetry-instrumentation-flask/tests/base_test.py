@@ -12,11 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from random import randint
+
 import flask
 from werkzeug.test import Client
 from werkzeug.wrappers import Response
 
-from opentelemetry import context
+from opentelemetry import context, trace
 
 
 class InstrumentationTest:
@@ -33,6 +36,40 @@ class InstrumentationTest:
             "SQLCOMMENTER_ORM_TAGS_AND_VALUES", {}
         )
         return sqlcommenter_flask_values
+
+    @staticmethod
+    def _copy_context_endpoint():
+        @flask.copy_current_request_context
+        def _extract_header():
+            return flask.request.headers["x-req"]
+
+        # Despite `_extract_header` copying the request context,
+        # calling it shouldn't detach the parent Flask span's contextvar
+        request_header = _extract_header()
+
+        return {
+            "span_name": trace.get_current_span().name,
+            "request_header": request_header,
+        }
+
+    @staticmethod
+    def _multithreaded_endpoint(count):
+        def do_random_stuff():
+            @flask.copy_current_request_context
+            def inner():
+                return randint(0, 100)
+
+            return inner
+
+        executor = ThreadPoolExecutor(count)
+        futures = []
+        for _ in range(count):
+            futures.append(executor.submit(do_random_stuff()))
+        numbers = []
+        for future in as_completed(futures):
+            numbers.append(future.result())
+
+        return " ".join([str(i) for i in numbers])
 
     @staticmethod
     def _custom_response_headers():
@@ -61,6 +98,8 @@ class InstrumentationTest:
         # pylint: disable=no-member
         self.app.route("/hello/<int:helloid>")(self._hello_endpoint)
         self.app.route("/sqlcommenter")(self._sqlcommenter_endpoint)
+        self.app.route("/multithreaded")(self._multithreaded_endpoint)
+        self.app.route("/copy_context")(self._copy_context_endpoint)
         self.app.route("/excluded/<int:helloid>")(self._hello_endpoint)
         self.app.route("/excluded")(excluded_endpoint)
         self.app.route("/excluded2")(excluded2_endpoint)

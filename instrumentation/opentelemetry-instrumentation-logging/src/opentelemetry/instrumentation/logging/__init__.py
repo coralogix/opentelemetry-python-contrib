@@ -82,7 +82,6 @@ class LoggingInstrumentor(BaseInstrumentor):  # pylint: disable=empty-docstring
         return _instruments
 
     def _instrument(self, **kwargs):
-
         provider = kwargs.get("tracer_provider", None) or get_tracer_provider()
         old_factory = logging.getLogRecordFactory()
         LoggingInstrumentor._old_factory = old_factory
@@ -95,6 +94,7 @@ class LoggingInstrumentor(BaseInstrumentor):  # pylint: disable=empty-docstring
 
             record.otelSpanID = "0"
             record.otelTraceID = "0"
+            record.otelTraceSampled = False
 
             nonlocal service_name
             if service_name is None:
@@ -114,6 +114,7 @@ class LoggingInstrumentor(BaseInstrumentor):  # pylint: disable=empty-docstring
                 if ctx != INVALID_SPAN_CONTEXT:
                     record.otelSpanID = format(ctx.span_id, "016x")
                     record.otelTraceID = format(ctx.trace_id, "032x")
+                    record.otelTraceSampled = ctx.trace_flags.sampled
                     if callable(LoggingInstrumentor._log_hook):
                         try:
                             LoggingInstrumentor._log_hook(  # pylint: disable=E1102

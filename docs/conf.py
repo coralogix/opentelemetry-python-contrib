@@ -54,7 +54,13 @@ sdk_ext_dirs = [
     if isdir(join(sdk_ext, f))
 ]
 
-sys.path[:0] = exp_dirs + instr_dirs + sdk_ext_dirs + prop_dirs
+resource = "../resource"
+resource_dirs = [
+    os.path.abspath("/".join(["../resource", f, "src"]))
+    for f in listdir(resource)
+    if isdir(join(resource, f))
+]
+sys.path[:0] = exp_dirs + instr_dirs + sdk_ext_dirs + prop_dirs + resource_dirs
 
 # -- Project information -----------------------------------------------------
 
@@ -126,25 +132,14 @@ def getlistcfg(strval):
     ]
 
 
-if "class_references" in mcfg:
-    class_references = getlistcfg(mcfg["class_references"])
-    for class_reference in class_references:
-        nitpick_ignore.append(
-            (
-                "py:class",
-                class_reference,
-            )
-        )
+ignore_categories = ["py-class", "py-func", "py-exc", "py-obj", "any"]
 
-if "anys" in mcfg:
-    anys = getlistcfg(mcfg["anys"])
-    for _any in anys:
-        nitpick_ignore.append(
-            (
-                "any",
-                _any,
-            )
-        )
+for category in ignore_categories:
+    if category in mcfg:
+        items = getlistcfg(mcfg[category])
+        for item in items:
+            nitpick_ignore.append((category.replace("-", ":"), item))
+
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ["_templates"]

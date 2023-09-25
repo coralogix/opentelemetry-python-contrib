@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import logging
 from unittest import mock
 
 import pytest
@@ -22,6 +23,7 @@ from opentelemetry import trace
 from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider, export
+from opentelemetry.semconv.trace import SpanAttributes
 from opentelemetry.test.test_base import TestBase
 
 
@@ -128,11 +130,12 @@ class TestSqlalchemyInstrumentation(TestBase):
     def test_not_recording(self):
         mock_tracer = mock.Mock()
         mock_span = mock.Mock()
+        mock_context = mock.Mock()
         mock_span.is_recording.return_value = False
-        mock_span.__enter__ = mock.Mock(return_value=(mock.Mock(), None))
-        mock_span.__exit__ = mock.Mock(return_value=None)
-        mock_tracer.start_span.return_value = mock_span
-        mock_tracer.start_as_current_span.return_value = mock_span
+        mock_context.__enter__ = mock.Mock(return_value=mock_span)
+        mock_context.__exit__ = mock.Mock(return_value=None)
+        mock_tracer.start_span.return_value = mock_context
+        mock_tracer.start_as_current_span.return_value = mock_context
         with mock.patch("opentelemetry.trace.get_tracer") as tracer:
             tracer.return_value = mock_tracer
             engine = create_engine("sqlite:///:memory:")
@@ -159,6 +162,12 @@ class TestSqlalchemyInstrumentation(TestBase):
         self.assertEqual(len(spans), 2)
         # first span - the connection to the db
         self.assertEqual(spans[0].name, "connect")
+        self.assertEqual(
+            spans[0].attributes[SpanAttributes.DB_NAME], ":memory:"
+        )
+        self.assertEqual(
+            spans[0].attributes[SpanAttributes.DB_SYSTEM], "sqlite"
+        )
         self.assertEqual(spans[0].kind, trace.SpanKind.CLIENT)
         # second span - the query
         self.assertEqual(spans[1].name, "SELECT :memory:")
@@ -166,6 +175,43 @@ class TestSqlalchemyInstrumentation(TestBase):
         self.assertEqual(
             spans[1].instrumentation_scope.name,
             "opentelemetry.instrumentation.sqlalchemy",
+        )
+
+    def test_create_engine_wrapper_enable_commenter(self):
+        logging.getLogger("sqlalchemy.engine").setLevel(logging.INFO)
+        SQLAlchemyInstrumentor().instrument(
+            enable_commenter=True,
+            commenter_options={"db_framework": False},
+        )
+        from sqlalchemy import create_engine  # pylint: disable-all
+
+        engine = create_engine("sqlite:///:memory:")
+        cnx = engine.connect()
+        cnx.execute("SELECT  1;").fetchall()
+        # sqlcommenter
+        self.assertRegex(
+            self.caplog.records[-2].getMessage(),
+            r"SELECT  1 /\*db_driver='(.*)',traceparent='\d{1,2}-[a-zA-Z0-9_]{32}-[a-zA-Z0-9_]{16}-\d{1,2}'\*/;",
+        )
+
+    def test_create_engine_wrapper_enable_commenter_otel_values_false(self):
+        logging.getLogger("sqlalchemy.engine").setLevel(logging.INFO)
+        SQLAlchemyInstrumentor().instrument(
+            enable_commenter=True,
+            commenter_options={
+                "db_framework": False,
+                "opentelemetry_values": False,
+            },
+        )
+        from sqlalchemy import create_engine  # pylint: disable-all
+
+        engine = create_engine("sqlite:///:memory:")
+        cnx = engine.connect()
+        cnx.execute("SELECT  1;").fetchall()
+        # sqlcommenter
+        self.assertRegex(
+            self.caplog.records[-2].getMessage(),
+            r"SELECT  1 /\*db_driver='(.*)'\*/;",
         )
 
     def test_custom_tracer_provider(self):
@@ -217,6 +263,12 @@ class TestSqlalchemyInstrumentation(TestBase):
             self.assertEqual(len(spans), 2)
             # first span - the connection to the db
             self.assertEqual(spans[0].name, "connect")
+            self.assertEqual(
+                spans[0].attributes[SpanAttributes.DB_NAME], ":memory:"
+            )
+            self.assertEqual(
+                spans[0].attributes[SpanAttributes.DB_SYSTEM], "sqlite"
+            )
             self.assertEqual(spans[0].kind, trace.SpanKind.CLIENT)
             # second span - the query
             self.assertEqual(spans[1].name, "SELECT :memory:")
@@ -224,6 +276,65 @@ class TestSqlalchemyInstrumentation(TestBase):
             self.assertEqual(
                 spans[1].instrumentation_scope.name,
                 "opentelemetry.instrumentation.sqlalchemy",
+            )
+
+        asyncio.get_event_loop().run_until_complete(run())
+
+    @pytest.mark.skipif(
+        not sqlalchemy.__version__.startswith("1.4"),
+        reason="only run async tests for 1.4",
+    )
+    def test_create_async_engine_wrapper_enable_commenter(self):
+        async def run():
+            logging.getLogger("sqlalchemy.engine").setLevel(logging.INFO)
+            SQLAlchemyInstrumentor().instrument(
+                enable_commenter=True,
+                commenter_options={
+                    "db_framework": False,
+                },
+            )
+            from sqlalchemy.ext.asyncio import (  # pylint: disable-all
+                create_async_engine,
+            )
+
+            engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+            async with engine.connect() as cnx:
+                await cnx.execute(sqlalchemy.text("SELECT  1;"))
+            # sqlcommenter
+            self.assertRegex(
+                self.caplog.records[1].getMessage(),
+                r"SELECT  1 /\*db_driver='(.*)',traceparent='\d{1,2}-[a-zA-Z0-9_]{32}-[a-zA-Z0-9_]{16}-\d{1,2}'\*/;",
+            )
+
+        asyncio.get_event_loop().run_until_complete(run())
+
+    @pytest.mark.skipif(
+        not sqlalchemy.__version__.startswith("1.4"),
+        reason="only run async tests for 1.4",
+    )
+    def test_create_async_engine_wrapper_enable_commenter_otel_values_false(
+        self,
+    ):
+        async def run():
+            logging.getLogger("sqlalchemy.engine").setLevel(logging.INFO)
+            SQLAlchemyInstrumentor().instrument(
+                enable_commenter=True,
+                commenter_options={
+                    "db_framework": False,
+                    "opentelemetry_values": False,
+                },
+            )
+            from sqlalchemy.ext.asyncio import (  # pylint: disable-all
+                create_async_engine,
+            )
+
+            engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+            async with engine.connect() as cnx:
+                await cnx.execute(sqlalchemy.text("SELECT  1;"))
+            # sqlcommenter
+            self.assertRegex(
+                self.caplog.records[1].getMessage(),
+                r"SELECT  1 /\*db_driver='(.*)'\*/;",
             )
 
         asyncio.get_event_loop().run_until_complete(run())
@@ -248,9 +359,38 @@ class TestSqlalchemyInstrumentation(TestBase):
 
         self.memory_exporter.clear()
         SQLAlchemyInstrumentor().uninstrument()
+        cnx.execute("SELECT	1 + 1;").fetchall()
         engine2 = create_engine("sqlite:///:memory:")
         cnx2 = engine2.connect()
         cnx2.execute("SELECT	2 + 2;").fetchall()
+        spans = self.memory_exporter.get_finished_spans()
+        self.assertEqual(len(spans), 0)
+
+        SQLAlchemyInstrumentor().instrument(
+            engine=engine,
+            tracer_provider=self.tracer_provider,
+        )
+        cnx = engine.connect()
+        cnx.execute("SELECT	1 + 1;").fetchall()
+        spans = self.memory_exporter.get_finished_spans()
+        self.assertEqual(len(spans), 2)
+
+    def test_uninstrument_without_engine(self):
+        SQLAlchemyInstrumentor().instrument(
+            tracer_provider=self.tracer_provider
+        )
+        from sqlalchemy import create_engine
+
+        engine = create_engine("sqlite:///:memory:")
+
+        cnx = engine.connect()
+        cnx.execute("SELECT	1 + 1;").fetchall()
+        spans = self.memory_exporter.get_finished_spans()
+        self.assertEqual(len(spans), 2)
+
+        self.memory_exporter.clear()
+        SQLAlchemyInstrumentor().uninstrument()
+        cnx.execute("SELECT	1 + 1;").fetchall()
         spans = self.memory_exporter.get_finished_spans()
         self.assertEqual(len(spans), 0)
 
@@ -264,3 +404,26 @@ class TestSqlalchemyInstrumentation(TestBase):
         cnx.execute("SELECT 1 + 1;").fetchall()
         spans = self.memory_exporter.get_finished_spans()
         self.assertEqual(len(spans), 0)
+
+    def test_no_memory_leakage_if_engine_diposed(self):
+        SQLAlchemyInstrumentor().instrument()
+        import gc
+        import weakref
+
+        from sqlalchemy import create_engine
+
+        callback = mock.Mock()
+
+        def make_shortlived_engine():
+            engine = create_engine("sqlite:///:memory:")
+            # Callback will be called if engine is deallocated during garbage
+            # collection
+            weakref.finalize(engine, callback)
+            with engine.connect() as conn:
+                conn.execute("SELECT 1 + 1;").fetchall()
+
+        for _ in range(0, 5):
+            make_shortlived_engine()
+
+        gc.collect()
+        assert callback.call_count == 5

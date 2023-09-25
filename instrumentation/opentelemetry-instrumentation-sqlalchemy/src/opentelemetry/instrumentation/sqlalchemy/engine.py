@@ -13,13 +13,14 @@
 # limitations under the License.
 import os
 import re
+import weakref
 
-from sqlalchemy.event import listen  # pylint: disable=no-name-in-module
+from sqlalchemy.event import (  # pylint: disable=no-name-in-module
+    listen,
+    remove,
+)
 
 from opentelemetry import trace
-from opentelemetry.instrumentation.sqlalchemy.package import (
-    _instrumenting_module_name,
-)
 from opentelemetry.instrumentation.sqlalchemy.version import __version__
 from opentelemetry.instrumentation.sqlcommenter_utils import _add_sql_comment
 from opentelemetry.instrumentation.utils import _get_opentelemetry_values
@@ -41,15 +42,9 @@ def _normalize_vendor(vendor):
     return vendor
 
 
-def _get_tracer(tracer_provider=None):
-    return trace.get_tracer(
-        _instrumenting_module_name,
-        __version__,
-        tracer_provider=tracer_provider,
-    )
-
-
-def _wrap_create_async_engine(tracer_provider=None, enable_commenter=False):
+def _wrap_create_async_engine(
+    tracer, connections_usage, enable_commenter=False, commenter_options=None
+):
     # pylint: disable=unused-argument
     def _wrap_create_async_engine_internal(func, module, args, kwargs):
         """Trace the SQLAlchemy engine, creating an `EngineTracer`
@@ -57,59 +52,140 @@ def _wrap_create_async_engine(tracer_provider=None, enable_commenter=False):
         """
         engine = func(*args, **kwargs)
         EngineTracer(
-            _get_tracer(tracer_provider), engine.sync_engine, enable_commenter
+            tracer,
+            engine.sync_engine,
+            connections_usage,
+            enable_commenter,
+            commenter_options,
         )
         return engine
 
     return _wrap_create_async_engine_internal
 
 
-def _wrap_create_engine(tracer_provider=None, enable_commenter=False):
-    # pylint: disable=unused-argument
-    def _wrap_create_engine_internal(func, module, args, kwargs):
+def _wrap_create_engine(
+    tracer, connections_usage, enable_commenter=False, commenter_options=None
+):
+    def _wrap_create_engine_internal(func, _module, args, kwargs):
         """Trace the SQLAlchemy engine, creating an `EngineTracer`
         object that will listen to SQLAlchemy events.
         """
         engine = func(*args, **kwargs)
-        EngineTracer(_get_tracer(tracer_provider), engine, enable_commenter)
+        EngineTracer(
+            tracer,
+            engine,
+            connections_usage,
+            enable_commenter,
+            commenter_options,
+        )
         return engine
 
     return _wrap_create_engine_internal
 
 
-def _wrap_connect(tracer_provider=None):
-    tracer = trace.get_tracer(
-        _instrumenting_module_name,
-        __version__,
-        tracer_provider=tracer_provider,
-    )
-
+def _wrap_connect(tracer):
     # pylint: disable=unused-argument
     def _wrap_connect_internal(func, module, args, kwargs):
         with tracer.start_as_current_span(
             "connect", kind=trace.SpanKind.CLIENT
-        ):
+        ) as span:
+            if span.is_recording():
+                attrs, _ = _get_attributes_from_url(module.url)
+                span.set_attributes(attrs)
+                span.set_attribute(
+                    SpanAttributes.DB_SYSTEM, _normalize_vendor(module.name)
+                )
             return func(*args, **kwargs)
 
     return _wrap_connect_internal
 
 
 class EngineTracer:
+    _remove_event_listener_params = []
+
     def __init__(
-        self, tracer, engine, enable_commenter=False, commenter_options=None
+        self,
+        tracer,
+        engine,
+        connections_usage,
+        enable_commenter=False,
+        commenter_options=None,
     ):
         self.tracer = tracer
-        self.engine = engine
+        self.connections_usage = connections_usage
         self.vendor = _normalize_vendor(engine.name)
         self.enable_commenter = enable_commenter
         self.commenter_options = commenter_options if commenter_options else {}
+        self._engine_attrs = _get_attributes_from_engine(engine)
         self._leading_comment_remover = re.compile(r"^/\*.*?\*/")
 
-        listen(
+        self._register_event_listener(
             engine, "before_cursor_execute", self._before_cur_exec, retval=True
         )
-        listen(engine, "after_cursor_execute", _after_cur_exec)
-        listen(engine, "handle_error", _handle_error)
+        self._register_event_listener(
+            engine, "after_cursor_execute", _after_cur_exec
+        )
+        self._register_event_listener(engine, "handle_error", _handle_error)
+        self._register_event_listener(engine, "connect", self._pool_connect)
+        self._register_event_listener(engine, "close", self._pool_close)
+        self._register_event_listener(engine, "checkin", self._pool_checkin)
+        self._register_event_listener(engine, "checkout", self._pool_checkout)
+
+    def _add_idle_to_connection_usage(self, value):
+        self.connections_usage.add(
+            value,
+            attributes={
+                **self._engine_attrs,
+                "state": "idle",
+            },
+        )
+
+    def _add_used_to_connection_usage(self, value):
+        self.connections_usage.add(
+            value,
+            attributes={
+                **self._engine_attrs,
+                "state": "used",
+            },
+        )
+
+    def _pool_connect(self, _dbapi_connection, _connection_record):
+        self._add_idle_to_connection_usage(1)
+
+    def _pool_close(self, _dbapi_connection, _connection_record):
+        self._add_idle_to_connection_usage(-1)
+
+    # Called when a connection returns to the pool.
+    def _pool_checkin(self, _dbapi_connection, _connection_record):
+        self._add_used_to_connection_usage(-1)
+        self._add_idle_to_connection_usage(1)
+
+    # Called when a connection is retrieved from the Pool.
+    def _pool_checkout(
+        self, _dbapi_connection, _connection_record, _connection_proxy
+    ):
+        self._add_idle_to_connection_usage(-1)
+        self._add_used_to_connection_usage(1)
+
+    @classmethod
+    def _register_event_listener(cls, target, identifier, func, *args, **kw):
+        listen(target, identifier, func, *args, **kw)
+        cls._remove_event_listener_params.append(
+            (weakref.ref(target), identifier, func)
+        )
+
+    @classmethod
+    def remove_all_event_listeners(cls):
+        for (
+            weak_ref_target,
+            identifier,
+            func,
+        ) in cls._remove_event_listener_params:
+            # Remove an event listener only if saved weak reference points to an object
+            # which has not been garbage collected
+            if weak_ref_target() is not None:
+                remove(weak_ref_target(), identifier, func)
+        cls._remove_event_listener_params.clear()
 
     def _operation_name(self, db_name, statement):
         parts = []
@@ -129,9 +205,8 @@ class EngineTracer:
             return self.vendor
         return " ".join(parts)
 
-    # pylint: disable=unused-argument
     def _before_cur_exec(
-        self, conn, cursor, statement, params, context, executemany
+        self, conn, cursor, statement, params, context, _executemany
     ):
         attrs, found = _get_attributes_from_url(conn.engine.url)
         if not found:
@@ -234,4 +309,23 @@ def _get_attributes_from_cursor(vendor, cursor, attrs):
             attrs[SpanAttributes.NET_PEER_NAME] = info.host
             if info.port:
                 attrs[SpanAttributes.NET_PEER_PORT] = int(info.port)
+    return attrs
+
+
+def _get_connection_string(engine):
+    drivername = engine.url.drivername or ""
+    host = engine.url.host or ""
+    port = engine.url.port or ""
+    database = engine.url.database or ""
+    return f"{drivername}://{host}:{port}/{database}"
+
+
+def _get_attributes_from_engine(engine):
+    """Set metadata attributes of the database engine"""
+    attrs = {}
+
+    attrs["pool.name"] = getattr(
+        getattr(engine, "pool", None), "logging_name", None
+    ) or _get_connection_string(engine)
+
     return attrs

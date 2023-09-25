@@ -221,7 +221,6 @@ class OpenTelemetryServerInterceptor(grpc.ServerInterceptor):
     def _start_span(
         self, handler_call_details, context, set_status_on_exception=False
     ):
-
         # standard attributes
         attributes = {
             SpanAttributes.RPC_SYSTEM: "grpc",
@@ -251,24 +250,30 @@ class OpenTelemetryServerInterceptor(grpc.ServerInterceptor):
         # * ipv4:127.0.0.1:57284
         # * ipv4:10.2.1.1:57284,127.0.0.1:57284
         #
-        try:
-            ip, port = (
-                context.peer().split(",")[0].split(":", 1)[1].rsplit(":", 1)
-            )
-            ip = unquote(ip)
-            attributes.update(
-                {
-                    SpanAttributes.NET_PEER_IP: ip,
-                    SpanAttributes.NET_PEER_PORT: port,
-                }
-            )
+        if context.peer() != "unix:":
+            try:
+                ip, port = (
+                    context.peer()
+                    .split(",")[0]
+                    .split(":", 1)[1]
+                    .rsplit(":", 1)
+                )
+                ip = unquote(ip)
+                attributes.update(
+                    {
+                        SpanAttributes.NET_PEER_IP: ip,
+                        SpanAttributes.NET_PEER_PORT: port,
+                    }
+                )
 
-            # other telemetry sources add this, so we will too
-            if ip in ("[::1]", "127.0.0.1"):
-                attributes[SpanAttributes.NET_PEER_NAME] = "localhost"
+                # other telemetry sources add this, so we will too
+                if ip in ("[::1]", "127.0.0.1"):
+                    attributes[SpanAttributes.NET_PEER_NAME] = "localhost"
 
-        except IndexError:
-            logger.warning("Failed to parse peer address '%s'", context.peer())
+            except IndexError:
+                logger.warning(
+                    "Failed to parse peer address '%s'", context.peer()
+                )
 
         return self._tracer.start_as_current_span(
             name=handler_call_details.method,
@@ -283,7 +288,6 @@ class OpenTelemetryServerInterceptor(grpc.ServerInterceptor):
 
         def telemetry_wrapper(behavior, request_streaming, response_streaming):
             def telemetry_interceptor(request_or_iterator, context):
-
                 # handle streaming responses specially
                 if response_streaming:
                     return self._intercept_server_stream(
@@ -327,7 +331,6 @@ class OpenTelemetryServerInterceptor(grpc.ServerInterceptor):
     def _intercept_server_stream(
         self, behavior, handler_call_details, request_or_iterator, context
     ):
-
         with self._set_remote_context(context):
             with self._start_span(
                 handler_call_details, context, set_status_on_exception=False

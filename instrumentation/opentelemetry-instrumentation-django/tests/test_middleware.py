@@ -74,9 +74,13 @@ DJANGO_2_2 = VERSION >= (2, 2)
 DJANGO_3_0 = VERSION >= (3, 0)
 
 if DJANGO_2_0:
-    from django.urls import re_path
+    from django.urls import path, re_path
 else:
     from django.conf.urls import url as re_path
+
+    def path(path_argument, *args, **kwargs):
+        return re_path(rf"^{path_argument}$", *args, **kwargs)
+
 
 urlpatterns = [
     re_path(r"^traced/", traced),
@@ -87,10 +91,12 @@ urlpatterns = [
     re_path(r"^excluded_noarg/", excluded_noarg),
     re_path(r"^excluded_noarg2/", excluded_noarg2),
     re_path(r"^span_name/([0-9]{4})/$", route_span_name),
+    path("", traced, name="empty"),
 ]
 _django_instrumentor = DjangoInstrumentor()
 
 
+# pylint: disable=too-many-public-methods
 class TestMiddleware(WsgiTestBase):
     @classmethod
     def setUpClass(cls):
@@ -149,9 +155,9 @@ class TestMiddleware(WsgiTestBase):
 
         self.assertEqual(
             span.name,
-            "^route/(?P<year>[0-9]{4})/template/$"
+            "GET ^route/(?P<year>[0-9]{4})/template/$"
             if DJANGO_2_2
-            else "tests.views.traced_template",
+            else "GET",
         )
         self.assertEqual(span.kind, SpanKind.SERVER)
         self.assertEqual(span.status.status_code, StatusCode.UNSET)
@@ -176,9 +182,7 @@ class TestMiddleware(WsgiTestBase):
 
         span = spans[0]
 
-        self.assertEqual(
-            span.name, "^traced/" if DJANGO_2_2 else "tests.views.traced"
-        )
+        self.assertEqual(span.name, "GET ^traced/" if DJANGO_2_2 else "GET")
         self.assertEqual(span.kind, SpanKind.SERVER)
         self.assertEqual(span.status.status_code, StatusCode.UNSET)
         self.assertEqual(span.attributes[SpanAttributes.HTTP_METHOD], "GET")
@@ -206,6 +210,16 @@ class TestMiddleware(WsgiTestBase):
             self.assertFalse(mock_span.set_attribute.called)
             self.assertFalse(mock_span.set_status.called)
 
+    def test_empty_path(self):
+        Client().get("/")
+
+        spans = self.memory_exporter.get_finished_spans()
+        self.assertEqual(len(spans), 1)
+
+        span = spans[0]
+
+        self.assertEqual(span.name, "GET empty")
+
     def test_traced_post(self):
         Client().post("/traced/")
 
@@ -214,9 +228,7 @@ class TestMiddleware(WsgiTestBase):
 
         span = spans[0]
 
-        self.assertEqual(
-            span.name, "^traced/" if DJANGO_2_2 else "tests.views.traced"
-        )
+        self.assertEqual(span.name, "POST ^traced/" if DJANGO_2_2 else "POST")
         self.assertEqual(span.kind, SpanKind.SERVER)
         self.assertEqual(span.status.status_code, StatusCode.UNSET)
         self.assertEqual(span.attributes[SpanAttributes.HTTP_METHOD], "POST")
@@ -240,9 +252,7 @@ class TestMiddleware(WsgiTestBase):
 
         span = spans[0]
 
-        self.assertEqual(
-            span.name, "^error/" if DJANGO_2_2 else "tests.views.error"
-        )
+        self.assertEqual(span.name, "GET ^error/" if DJANGO_2_2 else "GET")
         self.assertEqual(span.kind, SpanKind.SERVER)
         self.assertEqual(span.status.status_code, StatusCode.ERROR)
         self.assertEqual(span.attributes[SpanAttributes.HTTP_METHOD], "GET")
@@ -285,6 +295,18 @@ class TestMiddleware(WsgiTestBase):
         span_list = self.memory_exporter.get_finished_spans()
         self.assertEqual(len(span_list), 1)
 
+    def test_exclude_lists_through_instrument(self):
+        _django_instrumentor.uninstrument()
+        _django_instrumentor.instrument(excluded_urls="excluded_explicit")
+        client = Client()
+        client.get("/excluded_explicit")
+        span_list = self.memory_exporter.get_finished_spans()
+        self.assertEqual(len(span_list), 0)
+
+        client.get("/excluded_arg/123")
+        span_list = self.memory_exporter.get_finished_spans()
+        self.assertEqual(len(span_list), 1)
+
     def test_span_name(self):
         # test no query_string
         Client().get("/span_name/1234/")
@@ -294,9 +316,7 @@ class TestMiddleware(WsgiTestBase):
         span = span_list[0]
         self.assertEqual(
             span.name,
-            "^span_name/([0-9]{4})/$"
-            if DJANGO_2_2
-            else "tests.views.route_span_name",
+            "GET ^span_name/([0-9]{4})/$" if DJANGO_2_2 else "GET",
         )
 
     def test_span_name_for_query_string(self):
@@ -310,9 +330,7 @@ class TestMiddleware(WsgiTestBase):
         span = span_list[0]
         self.assertEqual(
             span.name,
-            "^span_name/([0-9]{4})/$"
-            if DJANGO_2_2
-            else "tests.views.route_span_name",
+            "GET ^span_name/([0-9]{4})/$" if DJANGO_2_2 else "GET",
         )
 
     def test_span_name_404(self):
@@ -321,7 +339,7 @@ class TestMiddleware(WsgiTestBase):
         self.assertEqual(len(span_list), 1)
 
         span = span_list[0]
-        self.assertEqual(span.name, "HTTP GET")
+        self.assertEqual(span.name, "GET")
 
     def test_traced_request_attrs(self):
         Client().get("/span_name/1234/", CONTENT_TYPE="test/ct")
