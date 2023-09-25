@@ -508,6 +508,31 @@ def _instrument(
         except Exception as ex:
             pass
 
+        eventBridgeTriggerSpan = None
+        try:
+            if type(lambda_event) is dict and lambda_event.get("source") is not None and type(lambda_event.get("source")) is str:
+                span_name = 'EventBridge event'
+                if lambda_event.get("detail-type") is not None:
+                    span_name = lambda_event.get("detail-type")
+
+                links = []
+                if lambda_event.get("detail") is not None and lambda_event["detail"].get("_context") is not None:
+                    ctx = get_global_textmap().extract(carrier=lambda_event["detail"].get("_context"))
+                    links.append(Link(get_current_span(ctx).get_span_context())) 
+
+                eventBridgeTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.CONSUMER, links=links)
+                eventBridgeTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "pubsub")
+                eventBridgeTriggerSpan.set_attribute("faas.trigger.type", "EventBridge")
+                eventBridgeTriggerSpan.set_attribute("aws.event.bridge.trigger.source", lambda_event.get("source"))
+                parent_context = set_span_in_context(eventBridgeTriggerSpan)
+
+                eventBridgeTriggerSpan.set_attribute(
+                    "rpc.request.body",
+                    json.dumps(lambda_event),
+                )
+        except Exception as ex:
+            pass
+ 
         try:
             with tracer.start_as_current_span(
                 name=orig_handler_name,
@@ -664,6 +689,22 @@ def _instrument(
                     except Exception:
                         pass
                     cognitoTriggerSpan.end()  
+                
+                if lambda_event and eventBridgeTriggerSpan is not None:
+                    try:
+                        if isinstance(result, dict) and result.get("statusCode"):
+                            eventBridgeTriggerSpan.set_attribute(
+                                SpanAttributes.HTTP_STATUS_CODE,
+                                result.get("statusCode"),
+                            )
+                        if isinstance(result, dict) and result.get("body"):
+                            eventBridgeTriggerSpan.set_attribute(
+                                "rpc.response.body",
+                                result.get("body"),
+                            )
+                    except Exception:
+                        pass
+                    eventBridgeTriggerSpan.end()  
                     
             now = time.time()
             _tracer_provider = tracer_provider or get_tracer_provider()
@@ -691,6 +732,8 @@ def _instrument(
                 dynamoTriggerSpan.end()
             if cognitoTriggerSpan is not None:
                 cognitoTriggerSpan.end()
+            if eventBridgeTriggerSpan is not None:
+                eventBridgeTriggerSpan.end()
 
             now = time.time()
             _tracer_provider = tracer_provider or get_tracer_provider()
