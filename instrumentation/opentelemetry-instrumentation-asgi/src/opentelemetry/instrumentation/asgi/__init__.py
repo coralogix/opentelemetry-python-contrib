@@ -510,6 +510,16 @@ class OpenTelemetryMiddleware:
             unit="By",
             description="Measures the size of HTTP request messages (compressed).",
         )
+        self.server_response_size_histogram = self.meter.create_histogram(
+            name=MetricInstruments.HTTP_SERVER_RESPONSE_SIZE,
+            unit="By",
+            description="measures the size of HTTP response messages (compressed).",
+        )
+        self.server_request_size_histogram = self.meter.create_histogram(
+            name=MetricInstruments.HTTP_SERVER_REQUEST_SIZE,
+            unit="By",
+            description="Measures the size of HTTP request messages (compressed).",
+        )
         self.active_requests_counter = self.meter.create_up_down_counter(
             name=MetricInstruments.HTTP_SERVER_ACTIVE_REQUESTS,
             unit="requests",

@@ -234,6 +234,7 @@ class BotocoreInstrumentor(BaseInstrumentor):
                     attributes["rpc.request.payload"] = limit_string_size(self.payload_size_limit,json.dumps(body, default=str))
             elif call_context.service == "events" and call_context.operation == "PutEvents":
                 call_context.span_kind = SpanKind.PRODUCER
+                attributes["rpc.request.payload"] = limit_string_size(self.payload_size_limit, json.dumps(call_context.params, default=str))
             else:
                 attributes["rpc.request.payload"] = limit_string_size(self.payload_size_limit, json.dumps(call_context.params, default=str))
         except Exception as ex:
@@ -483,7 +484,7 @@ class SQSSetter():
         val = {"DataType": "String", "StringValue": value}
         carrier[key] = val
 
-def limit_string_size(s: str, max_size: int) -> str:
+def limit_string_size(max_size: int, s: str) -> str:
     if len(s) > max_size:
         return s[:max_size]
     else:
