@@ -12,12 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
-
 from opentelemetry.instrumentation.botocore.extensions.types import (
     _AttributeMapT,
     _AwsSdkExtension,
     _BotoResultT,
 )
+from opentelemetry.instrumentation.botocore.utils import limit_string_size
 from opentelemetry.semconv.trace import SpanAttributes
 from opentelemetry.trace.span import Span
 
@@ -28,6 +28,7 @@ _logger = logging.getLogger(__name__)
 
 class _SqsExtension(_AwsSdkExtension):
     def extract_attributes(self, attributes: _AttributeMapT):
+
         queue_url = self._call_context.params.get("QueueUrl")
         if queue_url:
             # TODO: update when semantic conventions exist
@@ -36,7 +37,7 @@ class _SqsExtension(_AwsSdkExtension):
             attributes[SpanAttributes.MESSAGING_URL] = queue_url
             payload = self._call_context.params.get("MessageBody")
             if payload is not None:
-                attributes["rpc.request.payload"] = payload
+                attributes["rpc.request.payload"] = limit_string_size(payload)
 
             try:
                 attributes[
