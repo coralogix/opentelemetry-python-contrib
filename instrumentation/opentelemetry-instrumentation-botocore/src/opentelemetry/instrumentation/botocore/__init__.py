@@ -82,6 +82,7 @@ import logging
 import json
 import io
 import os
+from opentelemetry.instrumentation.botocore.utils import limit_string_size, get_payload_size_limit
 from typing import Any, Callable, Collection, Dict, Optional, Tuple
 
 from botocore.client import BaseClient
@@ -131,7 +132,6 @@ class BotocoreInstrumentor(BaseInstrumentor):
         super().__init__()
         self.request_hook = None
         self.response_hook = None
-        self.payload_size_limit = 51200
 
     def instrumentation_dependencies(self) -> Collection[str]:
         return _instruments
@@ -215,28 +215,28 @@ class BotocoreInstrumentor(BaseInstrumentor):
             if call_context.operation == "ListObjects":
                 bucket = call_context.params.get("Bucket")
                 if bucket is not None:
-                    attributes["rpc.request.payload"] = bucket
+                    attributes["rpc.request.payload"] = limit_string_size(bucket)
             elif call_context.operation == "PutObject":
                 body = call_context.params.get("Body")
                 if body is not None:
-                    attributes["rpc.request.payload"] = limit_string_size(self.payload_size_limit, body.decode('ascii'))
+                    attributes["rpc.request.payload"] = limit_string_size(body.decode('ascii'))
             elif call_context.operation == "PutItem":
                 body = call_context.params.get("Item")
                 if body is not None:
-                    attributes["rpc.request.payload"] = limit_string_size(self.payload_size_limit, json.dumps(body, default=str))
+                    attributes["rpc.request.payload"] = limit_string_size(json.dumps(body, default=str))
             elif call_context.operation == "GetItem":
                 body = call_context.params.get("Key")
                 if body is not None:
-                    attributes["rpc.request.payload"] = limit_string_size(self.payload_size_limit,json.dumps(body, default=str))
+                    attributes["rpc.request.payload"] = limit_string_size(json.dumps(body, default=str))
             elif call_context.operation == "Publish":
                 body = call_context.params.get("Message")
                 if body is not None:
-                    attributes["rpc.request.payload"] = limit_string_size(self.payload_size_limit,json.dumps(body, default=str))
+                    attributes["rpc.request.payload"] = limit_string_size(json.dumps(body, default=str))
             elif call_context.service == "events" and call_context.operation == "PutEvents":
                 call_context.span_kind = SpanKind.PRODUCER
-                attributes["rpc.request.payload"] = limit_string_size(self.payload_size_limit, json.dumps(call_context.params, default=str))
+                attributes["rpc.request.payload"] = limit_string_size(json.dumps(call_context.params, default=str))
             else:
-                attributes["rpc.request.payload"] = limit_string_size(self.payload_size_limit, json.dumps(call_context.params, default=str))
+                attributes["rpc.request.payload"] = limit_string_size(json.dumps(call_context.params, default=str))
         except Exception as ex:
             pass
 
@@ -317,11 +317,11 @@ class BotocoreInstrumentor(BaseInstrumentor):
                 result = original_func(*args, **kwargs)
             except ClientError as error:
                 result = getattr(error, "response", None)
-                _apply_response_attributes(span, result, self.payload_size_limit)
+                _apply_response_attributes(span, result)
                 _safe_invoke(extension.on_error, span, error)
                 raise
             else:
-                _apply_response_attributes(span, result, self.payload_size_limit)
+                _apply_response_attributes(span, result)
                 _safe_invoke(extension.on_success, span, result)
             finally:
                 _safe_invoke(extension.after_service_call)
@@ -349,7 +349,7 @@ class BotocoreInstrumentor(BaseInstrumentor):
         )
 
 
-def _apply_response_attributes(span: Span, result, payload_size_limit):
+def _apply_response_attributes(span: Span, result):
     if result is None or not span.is_recording():
         return
 
@@ -392,15 +392,15 @@ def _apply_response_attributes(span: Span, result, payload_size_limit):
                 body = result.get("Body")
                 if buckets is not None:
                     span.set_attribute(
-                        "rpc.response.payload", json.dumps([b.get("Name") for b in buckets]))
+                        "rpc.response.payload", limit_string_size(json.dumps([b.get("Name") for b in buckets])))
                 elif content is not None:
                     span.set_attribute(
-                        "rpc.response.payload", json.dumps([b.get("Key") for b in content]))
+                        "rpc.response.payload", limit_string_size(json.dumps([b.get("Key") for b in content])))
                 elif body is not None:
                     pass
                 else:
                     span.set_attribute(
-                        "rpc.response.payload", json.dumps(result, default=str))
+                        "rpc.response.payload", limit_string_size(json.dumps(result, default=str)))
                 #elif body is not None:
                 #    try:
                 #        d = {x: result[x] for x in result if x != "Body"}
@@ -418,20 +418,20 @@ def _apply_response_attributes(span: Span, result, payload_size_limit):
                 #    except Exception as ex:
                 #        pass
             # Lambda Invoke
-            elif result.get("Payload") is not None and result.get("Payload")._content_length is not None and int(result.get("Payload")._content_length) < payload_size_limit:
+            elif result.get("Payload") is not None and result.get("Payload")._content_length is not None and int(result.get("Payload")._content_length) < get_payload_size_limit():
                 length = result.get("Payload")._content_length
                 strbody = result.get("Payload").read()
                 result.get("Payload").close()
                 span.set_attribute(
-                    "rpc.response.payload", strbody)
+                    "rpc.response.payload", limit_string_size(strbody))
                 result['Payload'] = StreamingBody(io.BytesIO(strbody), content_length=length)
             # DynamoDB get item
             elif server == "Server":
                 span.set_attribute(
-                    "rpc.response.payload", json.dumps(result, default=str))
+                    "rpc.response.payload", limit_string_size(json.dumps(result, default=str)))
             else:
                 span.set_attribute(
-                    "rpc.response.payload", json.dumps(result, default=str))
+                    "rpc.response.payload", limit_string_size(json.dumps(result, default=str)))
     except Exception as ex:
         pass
 
@@ -483,10 +483,3 @@ class SQSSetter():
         """
         val = {"DataType": "String", "StringValue": value}
         carrier[key] = val
-
-def limit_string_size(max_size: int, s: str) -> str:
-    if len(s) > max_size:
-        return s[:max_size]
-    else:
-        return s
-

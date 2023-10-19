@@ -79,6 +79,7 @@ from wrapt import wrap_function_wrapper
 from opentelemetry.context.context import Context
 from opentelemetry.instrumentation.aws_lambda.package import _instruments
 from opentelemetry.instrumentation.aws_lambda.version import __version__
+from opentelemetry.instrumentation.aws_lambda.utils import limit_string_size
 from opentelemetry.instrumentation.instrumentor import BaseInstrumentor
 from opentelemetry.instrumentation.utils import unwrap
 from opentelemetry.metrics import MeterProvider, get_meter_provider
@@ -235,7 +236,7 @@ def _set_api_gateway_v1_proxy_attributes(
     if lambda_event.get("body"):
         span.set_attribute(
             "http.request.body",
-            lambda_event.get("body"),
+            limit_string_size(lambda_event.get("body")),
         )
 
     if lambda_event.get("headers"):
@@ -287,7 +288,7 @@ def _set_api_gateway_v2_proxy_attributes(
     if lambda_event.get("body"):
         span.set_attribute(
             "http.request.body",
-            lambda_event.get("body"),
+            limit_string_size(lambda_event.get("body")),
         )
 
     if lambda_event["requestContext"].get("http"):
@@ -418,7 +419,7 @@ def _instrument(
                 if lambda_event["Records"][0].get("s3"):
                     s3TriggerSpan.set_attribute(
                         "rpc.request.body",
-                        json.dumps(lambda_event["Records"][0].get("s3")),
+                        limit_string_size(json.dumps(lambda_event["Records"][0].get("s3"))),
                     )    
         except Exception as ex:
             pass
@@ -445,7 +446,7 @@ def _instrument(
                 if lambda_event["Records"][0].get("body"):
                     sqsTriggerSpan.set_attribute(
                         "rpc.request.body",
-                        lambda_event["Records"][0].get("body"),
+                        limit_string_size(lambda_event["Records"][0].get("body")),
                     )
 
         except Exception as ex:
@@ -465,7 +466,7 @@ def _instrument(
                 if lambda_event["Records"][0]["Sns"] and lambda_event["Records"][0]["Sns"].get("Message"):
                     snsTriggerSpan.set_attribute(
                         "rpc.request.body",
-                        lambda_event["Records"][0]["Sns"].get("Message"),
+                        limit_string_size(lambda_event["Records"][0]["Sns"].get("Message")),
                     )    
         except Exception as ex:
             pass
@@ -486,7 +487,7 @@ def _instrument(
                 if lambda_event["Records"][0].get("dynamodb"):
                     dynamoTriggerSpan.set_attribute(
                         "rpc.request.body",
-                        json.dumps(lambda_event["Records"][0].get("dynamodb")),
+                        limit_string_size(json.dumps(lambda_event["Records"][0].get("dynamodb"))),
                     )    
         except Exception as ex:
             pass
@@ -507,7 +508,7 @@ def _instrument(
                 if lambda_event["datasetRecords"]:
                     cognitoTriggerSpan.set_attribute(
                         "rpc.request.body",
-                        json.dumps(lambda_event["datasetRecords"]),
+                        limit_string_size(json.dumps(lambda_event["datasetRecords"])),
                     )
         except Exception as ex:
             pass
@@ -532,7 +533,7 @@ def _instrument(
 
                 eventBridgeTriggerSpan.set_attribute(
                     "rpc.request.body",
-                    json.dumps(lambda_event),
+                    limit_string_size(json.dumps(lambda_event)),
                 )
         except Exception as ex:
             pass
@@ -599,7 +600,7 @@ def _instrument(
                         if isinstance(result, dict) and result.get("body"):
                             apiGwSpan.set_attribute(
                                 "http.response.body",
-                                result.get("body"),
+                                limit_string_size(result.get("body")),
                             )
                         if lambda_event.get("headers"):
                             for key, value in lambda_event.get("headers").items():
@@ -615,10 +616,13 @@ def _instrument(
                         if lambda_event["Records"][0]["eventSource"] == "aws:sqs":
                             span.set_attribute(SpanAttributes.FAAS_TRIGGER, "pubsub")
                             span.set_attribute("messaging.message",
-                                            lambda_event["Records"])
-                    except Exception:
+                                            limit_string_size(lambda_event["Records"]))
+                    except Exception as ex:
+                        #print(traceback.format_exc())
+                        #print("exception")
+                        #print(ex)
                         pass
-                except Exception:
+                except Exception as ex:
                     # TODO check why we get exception
                     #print(traceback.format_exc())
                     #print("exception")
@@ -639,7 +643,7 @@ def _instrument(
                         if isinstance(result, dict) and result.get("body"):
                             s3TriggerSpan.set_attribute(
                                 "rpc.response.body",
-                                result.get("body"),
+                                limit_string_size(result.get("body")),
                             )
                     except Exception:
                         pass
@@ -656,7 +660,7 @@ def _instrument(
                         if isinstance(result, dict) and result.get("body"):
                             sqsTriggerSpan.set_attribute(
                                 "rpc.response.body",
-                                result.get("body"),
+                                limit_string_size(result.get("body")),
                             )
                     except Exception:
                         pass
@@ -672,7 +676,7 @@ def _instrument(
                         if isinstance(result, dict) and result.get("body"):
                             snsTriggerSpan.set_attribute(
                                 "rpc.response.body",
-                                result.get("body"),
+                                limit_string_size(result.get("body")),
                             )
                     except Exception:
                         pass
@@ -689,7 +693,7 @@ def _instrument(
                         if isinstance(result, dict) and result.get("body"):
                             dynamoTriggerSpan.set_attribute(
                                 "rpc.response.body",
-                                result.get("body"),
+                                limit_string_size(result.get("body")),
                             )
                     except Exception:
                         pass
@@ -705,7 +709,7 @@ def _instrument(
                         if isinstance(result, dict) and result.get("body"):
                             cognitoTriggerSpan.set_attribute(
                                 "rpc.response.body",
-                                result.get("body"),
+                                limit_string_size(result.get("body")),
                             )
                     except Exception:
                         pass
@@ -721,7 +725,7 @@ def _instrument(
                         if isinstance(result, dict) and result.get("body"):
                             eventBridgeTriggerSpan.set_attribute(
                                 "rpc.response.body",
-                                result.get("body"),
+                                limit_string_size(result.get("body")),
                             )
                     except Exception:
                         pass

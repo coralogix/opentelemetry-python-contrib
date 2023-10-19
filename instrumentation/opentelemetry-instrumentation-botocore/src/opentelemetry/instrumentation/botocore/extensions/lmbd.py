@@ -17,6 +17,8 @@ import inspect
 import json
 import re
 from typing import Dict
+from opentelemetry.instrumentation.botocore.utils import limit_string_size
+import os
 
 from opentelemetry.instrumentation.botocore.extensions.types import (
     _AttributeMapT,
@@ -67,7 +69,7 @@ class _OpInvoke(_LambdaOperation):
         ] = cls._parse_function_name(call_context)
         attributes[SpanAttributes.FAAS_INVOKED_REGION] = call_context.region
         if call_context.params.get("Payload") is not None:
-            attributes["rpc.request.body"] = call_context.params.get("Payload")
+            attributes["rpc.request.body"] = limit_string_size(call_context.params.get("Payload"))
 
     @classmethod
     def _parse_function_name(cls, call_context: _AwsSdkCallContext):

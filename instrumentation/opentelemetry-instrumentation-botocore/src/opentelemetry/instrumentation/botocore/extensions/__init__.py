@@ -14,7 +14,6 @@
 
 import importlib
 import logging
-
 from opentelemetry.instrumentation.botocore.extensions.types import (
     _AwsSdkCallContext,
     _AwsSdkExtension,
