@@ -102,6 +102,7 @@ from opentelemetry.trace import (
     set_span_in_context
 )
 from opentelemetry.trace.propagation import get_current_span
+from opentelemetry.trace.span import INVALID_SPAN_ID
 import json
 import typing
 #import traceback
@@ -430,7 +431,9 @@ def _instrument(
                     attributes = record.get("messageAttributes")
                     if attributes is not None:
                         ctx = get_global_textmap().extract(carrier=attributes, getter=SQSGetter())
-                        links.append(Link(get_current_span(ctx).get_span_context()))
+                        span_ctx = get_current_span(ctx).get_span_context()
+                        if span_ctx.span_id != INVALID_SPAN_ID:
+                            links.append(Link(span_ctx))
 
                 span_name = orig_handler_name
                 sqsTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.PRODUCER, links=links)
@@ -519,7 +522,9 @@ def _instrument(
                 links = []
                 if lambda_event.get("detail") is not None and lambda_event["detail"].get("_context") is not None:
                     ctx = get_global_textmap().extract(carrier=lambda_event["detail"].get("_context"))
-                    links.append(Link(get_current_span(ctx).get_span_context())) 
+                    span_ctx = get_current_span(ctx).get_span_context()
+                    if span_ctx.span_id != INVALID_SPAN_ID:
+                        links.append(Link(span_ctx))
 
                 eventBridgeTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.CONSUMER, links=links)
                 eventBridgeTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "pubsub")
@@ -595,7 +600,7 @@ def _instrument(
                         if lambda_event["Records"][0]["eventSource"] == "aws:sqs":
                             span.set_attribute(SpanAttributes.FAAS_TRIGGER, "pubsub")
                             span.set_attribute("messaging.message",
-                                            limit_string_size(lambda_event["Records"]))
+                                            limit_string_size(lambda_event["Records"][0].get("body")))
                     except Exception as ex:
                         #print(traceback.format_exc())
                         #print("exception")
