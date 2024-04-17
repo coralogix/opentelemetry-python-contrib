@@ -13,6 +13,7 @@
 # limitations under the License.
 import asyncio
 from unittest import mock
+from unittest.mock import AsyncMock
 
 import redis
 import redis.asyncio
