@@ -454,9 +454,20 @@ def _instrument(
         snsTriggerSpan = None
         try:
             if lambda_event["Records"][0]["EventSource"] == "aws:sns":
+                links = []
+
+                for record in lambda_event["Records"]:
+                    if record.get("Sns") is None:
+                        continue
+                    attributes = record.get("Sns").get("MessageAttributes")
+                    if attributes is not None:
+                        ctx = get_global_textmap().extract(carrier=attributes, getter=SNSGetter())
+                        span_ctx = get_current_span(ctx).get_span_context()
+                        if span_ctx.span_id != INVALID_SPAN_ID:
+                            links.append(Link(span_ctx))
                 span_kind = SpanKind.CONSUMER
                 span_name = orig_handler_name
-                snsTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.PRODUCER)
+                snsTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.PRODUCER, links=links)
                 snsTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "pubsub")
                 snsTriggerSpan.set_attribute("faas.trigger.type", "SNS")
 
@@ -869,6 +880,32 @@ class SQSGetter():
             return None
         if val.get("stringValue") is not None:
             return [val.get("stringValue")]
+        return None
+
+    def keys(
+        self, carrier: typing.Mapping[str, textmap.CarrierValT]
+    ) -> typing.List[str]:
+        """Keys implementation that returns all keys from a dictionary."""
+        return list(carrier.keys())
+
+
+class SNSGetter():
+    def get(
+        self, carrier: typing.Mapping[str, textmap.CarrierValT], key: str
+    ) -> typing.Optional[typing.List[str]]:
+        """Getter implementation to retrieve a value from a dictionary.
+
+        Args:
+            carrier: dictionary in which to get value
+            key: the key used to get the value
+        Returns:
+            A list with a single string with the value if it exists, else None.
+        """
+        val = carrier.get(key, None)
+        if val is None:
+            return None
+        if val.get("Value") is not None:
+            return [val.get("Value")]
         return None
 
     def keys(
