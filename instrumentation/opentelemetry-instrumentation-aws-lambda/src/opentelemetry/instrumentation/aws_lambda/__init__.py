@@ -105,6 +105,7 @@ from opentelemetry.trace.propagation import get_current_span
 from opentelemetry.trace.span import INVALID_SPAN_ID
 import json
 import typing
+import base64
 #import traceback
 #import tracemalloc
 
@@ -481,6 +482,43 @@ def _instrument(
         except Exception as ex:
             pass
 
+        kinesisTriggerSpan = None
+        try:
+            if lambda_event["Records"][0]["eventSource"] == "aws:kinesis":
+                links = []
+
+                for record in lambda_event["Records"]:
+                    if record.get("kinesis") is None:
+                        continue
+                    data = record["kinesis"].get("data")
+                    if data is not None:
+                        decoded_bytes = base64.b64decode(data)
+                        decoded_string = decoded_bytes.decode('utf-8')
+                        data = json.loads(decoded_string)
+                        ctx = get_global_textmap().extract(carrier=data.get("_context"))
+                        span_ctx = get_current_span(ctx).get_span_context()
+                        if span_ctx.span_id != INVALID_SPAN_ID:
+                            links.append(Link(span_ctx))
+                span_kind = SpanKind.INTERNAL
+                span_name = orig_handler_name
+                kinesisTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.CONSUMER, links=links)
+                kinesisTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "pubsub")
+                kinesisTriggerSpan.set_attribute("faas.trigger.type", "Kinesis")
+
+                parent_context = set_span_in_context(kinesisTriggerSpan)
+
+                if lambda_event["Records"][0]["kinesis"] and lambda_event["Records"][0]["kinesis"].get("data"):
+                    decoded_bytes = base64.b64decode(lambda_event["Records"][0]["kinesis"].get("data"))
+                    decoded_string = decoded_bytes.decode('utf-8')
+                    data = json.loads(decoded_string)
+
+                    kinesisTriggerSpan.set_attribute(
+                        "rpc.request.body",
+                        limit_string_size(data),
+                    )
+        except Exception as e:
+            pass
+
         dynamoTriggerSpan = None
         try:
             if lambda_event["Records"][0]["eventSource"] == "aws:dynamodb":
@@ -677,6 +715,17 @@ def _instrument(
                         pass
                     snsTriggerSpan.end()
 
+                if lambda_event and kinesisTriggerSpan is not None:
+                    try:
+                        if isinstance(result, dict) and result.get("ResponseMetadata"):
+                            if result["ResponseMetadata"].get("HTTPStatusCode"):
+                                kinesisTriggerSpan.set_attribute(
+                                    SpanAttributes.HTTP_STATUS_CODE,
+                                    result["ResponseMetadata"]["HTTPStatusCode"],
+                                )
+                    except Exception:
+                        pass
+                    kinesisTriggerSpan.end()
 
                 if lambda_event and dynamoTriggerSpan is not None:
                     try:
@@ -754,6 +803,8 @@ def _instrument(
                 cognitoTriggerSpan.end()
             if eventBridgeTriggerSpan is not None:
                 eventBridgeTriggerSpan.end()
+            if kinesisTriggerSpan is not None:
+                kinesisTriggerSpan.end()
 
             now = time.time()
             _tracer_provider = tracer_provider or get_tracer_provider()
