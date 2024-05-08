@@ -168,15 +168,6 @@ class BotocoreInstrumentor(BaseInstrumentor):
         if context_api.get_value(_SUPPRESS_INSTRUMENTATION_KEY):
             return original_func(*args, **kwargs)
 
-        #print("patched_api")
-        #print(json.dumps(instance, indent=4, sort_keys=True, default=str))
-        #print("args")
-        #print(args)
-        #print(json.dumps(args, indent=4, sort_keys=True, default=str))
-        #print("kwargs")
-        #print(kwargs)
-        #print(json.dumps(kwargs, indent=4, sort_keys=True, default=str))
-
         call_context = _determine_call_context(instance, args)
         if call_context is None:
             return original_func(*args, **kwargs)
@@ -215,14 +206,14 @@ class BotocoreInstrumentor(BaseInstrumentor):
             elif call_context.service == "events" and call_context.operation == "PutEvents":
                 call_context.span_kind = SpanKind.PRODUCER
                 attributes["rpc.request.payload"] = limit_string_size(json.dumps(call_context.params, default=str))
+            elif call_context.service == "kinesis" and (call_context.operation == "PutRecord" or call_context.operation == "PutRecords"):
+                call_context.span_kind = SpanKind.PRODUCER
+                attributes["rpc.request.payload"] = limit_string_size(json.dumps(call_context.params, default=str))
             else:
                 attributes["rpc.request.payload"] = limit_string_size(json.dumps(call_context.params, default=str))
         except Exception as ex:
             pass
 
-        #print("here")
-        #print(call_context.operation)
-        #print(json.dumps(call_context.params, indent=4, sort_keys=True, default=str))
         _safe_invoke(extension.extract_attributes, attributes)
 
         with self._tracer.start_as_current_span(
@@ -289,11 +280,18 @@ class BotocoreInstrumentor(BaseInstrumentor):
             except Exception as ex:
                 pass
 
+            try:
+                if call_context.service == "kinesis" and call_context.operation == "PutRecord":
+                    if args[1].get("Data") is not None:
+                        detailJson = json.loads(args[1].get("Data"))
+                        detailJson['_context'] = {}
+                        inject(carrier = detailJson['_context'])
+                        args[1]["Data"] = json.dumps(detailJson)
+            except Exception as e:
+                pass
+
             result = None
             try:
-                #print("calling original func")
-                #print(json.dumps(args, indent=4, sort_keys=True, default=str))
-
                 result = original_func(*args, **kwargs)
             except ClientError as error:
                 result = getattr(error, "response", None)
