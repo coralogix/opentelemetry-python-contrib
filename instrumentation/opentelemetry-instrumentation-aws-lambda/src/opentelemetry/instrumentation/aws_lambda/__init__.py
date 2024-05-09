@@ -107,7 +107,6 @@ import json
 import typing
 import base64
 #import traceback
-#import tracemalloc
 
 #tracemalloc.start(25)
 
@@ -437,7 +436,7 @@ def _instrument(
                             links.append(Link(span_ctx))
 
                 span_name = orig_handler_name
-                sqsTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.PRODUCER, links=links)
+                sqsTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.CONSUMER, links=links)
                 sqsTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "pubsub")
                 sqsTriggerSpan.set_attribute("faas.trigger.type", "SQS")
 
@@ -466,9 +465,9 @@ def _instrument(
                         span_ctx = get_current_span(ctx).get_span_context()
                         if span_ctx.span_id != INVALID_SPAN_ID:
                             links.append(Link(span_ctx))
-                span_kind = SpanKind.CONSUMER
+                span_kind = SpanKind.INTERNAL
                 span_name = orig_handler_name
-                snsTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.PRODUCER, links=links)
+                snsTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.CONSUMER, links=links)
                 snsTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "pubsub")
                 snsTriggerSpan.set_attribute("faas.trigger.type", "SNS")
 
@@ -657,9 +656,6 @@ def _instrument(
                         pass
                 except Exception as ex:
                     # TODO check why we get exception
-                    #print(traceback.format_exc())
-                    #print("exception")
-                    #print(ex)
                     # logger.error(
                     #    "TracerProvider was missing `force_flush` method. This is necessary in case of a Lambda freeze and would exist in the OTel SDK implementation."
                     # )
