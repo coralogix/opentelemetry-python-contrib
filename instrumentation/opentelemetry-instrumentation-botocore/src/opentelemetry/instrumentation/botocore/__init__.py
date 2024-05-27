@@ -208,6 +208,11 @@ class BotocoreInstrumentor(BaseInstrumentor):
                 attributes["rpc.request.payload"] = limit_string_size(json.dumps(call_context.params, default=str))
             elif call_context.service == "kinesis" and (call_context.operation == "PutRecord" or call_context.operation == "PutRecords"):
                 call_context.span_kind = SpanKind.PRODUCER
+                streamName = call_context.params.get("StreamName")
+                if streamName:
+                    attributes[SpanAttributes.MESSAGING_SYSTEM] = "aws.kinesis"
+                    attributes[SpanAttributes.MESSAGING_DESTINATION] = streamName
+
                 attributes["rpc.request.payload"] = limit_string_size(json.dumps(call_context.params, default=str))
             elif call_context.service == "sqs" and (call_context.operation == "SendMessageBatch" or call_context.operation == "SendMessage"):
                 call_context.span_kind = SpanKind.PRODUCER
