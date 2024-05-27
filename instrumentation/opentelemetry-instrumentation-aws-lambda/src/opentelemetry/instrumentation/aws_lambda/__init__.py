@@ -427,7 +427,11 @@ def _instrument(
                 "aws:sqs",
             }:
                 links = []
+                queue_url = ""
                 for record in lambda_event["Records"]:
+                    if queue_url == "":
+                        queue_url = record.get("eventSourceARN")
+
                     attributes = record.get("messageAttributes")
                     if attributes is not None:
                         ctx = get_global_textmap().extract(carrier=attributes, getter=SQSGetter())
@@ -439,6 +443,14 @@ def _instrument(
                 sqsTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.CONSUMER, links=links)
                 sqsTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "pubsub")
                 sqsTriggerSpan.set_attribute("faas.trigger.type", "SQS")
+                sqsTriggerSpan.set_attribute(SpanAttributes.MESSAGING_SYSTEM, "aws.sqs")
+                sqsTriggerSpan.set_attribute(SpanAttributes.MESSAGING_URL, queue_url)
+
+                try:
+                    # Example queue_url: arn:aws:sqs:us-east-1:123456789012:my_queue_name
+                    sqsTriggerSpan.set_attribute(SpanAttributes.MESSAGING_DESTINATION, queue_url.split(":")[-1])
+                except IndexError:
+                    pass
 
                 parent_context = set_span_in_context(sqsTriggerSpan)
 
@@ -455,21 +467,34 @@ def _instrument(
         try:
             if lambda_event["Records"][0]["EventSource"] == "aws:sns":
                 links = []
-
+                queue_url = ""
                 for record in lambda_event["Records"]:
                     if record.get("Sns") is None:
                         continue
+
+                    if queue_url == "":
+                        queue_url = record.get("Sns").get("TopicArn")
+
                     attributes = record.get("Sns").get("MessageAttributes")
                     if attributes is not None:
                         ctx = get_global_textmap().extract(carrier=attributes, getter=SNSGetter())
                         span_ctx = get_current_span(ctx).get_span_context()
                         if span_ctx.span_id != INVALID_SPAN_ID:
                             links.append(Link(span_ctx))
+
                 span_kind = SpanKind.INTERNAL
                 span_name = orig_handler_name
                 snsTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.CONSUMER, links=links)
                 snsTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "pubsub")
                 snsTriggerSpan.set_attribute("faas.trigger.type", "SNS")
+                snsTriggerSpan.set_attribute(SpanAttributes.MESSAGING_SYSTEM, "aws.sns")
+                snsTriggerSpan.set_attribute(SpanAttributes.MESSAGING_URL, queue_url)
+
+                try:
+                    # Example queue_url: arn:aws:sns:us-east-1:123456789012:my_topic_name
+                    snsTriggerSpan.set_attribute(SpanAttributes.MESSAGING_DESTINATION, queue_url.split(":")[-1])
+                except IndexError:
+                    pass
 
                 parent_context = set_span_in_context(snsTriggerSpan)
 
@@ -485,10 +510,15 @@ def _instrument(
         try:
             if lambda_event["Records"][0]["eventSource"] == "aws:kinesis":
                 links = []
+                queue_url = ""
 
                 for record in lambda_event["Records"]:
                     if record.get("kinesis") is None:
                         continue
+
+                    if queue_url == "":
+                        queue_url = record.get("eventSourceARN")
+
                     data = record["kinesis"].get("data")
                     if data is not None:
                         decoded_bytes = base64.b64decode(data)
@@ -503,6 +533,15 @@ def _instrument(
                 kinesisTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.CONSUMER, links=links)
                 kinesisTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "pubsub")
                 kinesisTriggerSpan.set_attribute("faas.trigger.type", "Kinesis")
+                kinesisTriggerSpan.set_attribute(SpanAttributes.MESSAGING_SYSTEM, "aws.kinesis")
+                kinesisTriggerSpan.set_attribute(SpanAttributes.MESSAGING_URL, queue_url)
+
+                try:
+                    # Example queue_url: arn:aws:kinesis:us-east-1:123456789012:stream/my_stream_name
+                    kinesisTriggerSpan.set_attribute(SpanAttributes.MESSAGING_DESTINATION, queue_url.split("/")[-1])
+                except IndexError:
+                    pass
+
 
                 parent_context = set_span_in_context(kinesisTriggerSpan)
 
