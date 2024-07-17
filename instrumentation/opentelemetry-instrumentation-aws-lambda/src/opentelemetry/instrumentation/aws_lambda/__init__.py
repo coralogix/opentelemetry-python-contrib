@@ -95,14 +95,20 @@ from opentelemetry.trace import (
     Span,
     SpanKind,
     Link,
+    Tracer,
     TracerProvider,
     get_current_span,
     get_tracer,
     get_tracer_provider,
-    set_span_in_context
+    set_span_in_context,
+    use_span,
 )
 from opentelemetry.trace.propagation import get_current_span
-from opentelemetry.trace.span import INVALID_SPAN_ID
+from opentelemetry.trace.span import (
+    INVALID_SPAN_ID,
+    format_trace_id,
+    format_span_id,
+)
 import json
 import typing
 import base64
@@ -172,12 +178,12 @@ def _default_event_context_extractor(args: Any) -> Context:
     return get_global_textmap().extract(headers)
 
 
-def _determine_parent_context(
+def _determine_upstream_context(
     lambda_event: Any,
     event_context_extractor: Callable[[Any], Context],
     disable_aws_context_propagation: bool = False,
 ) -> Context:
-    """Determine the parent context for the current Lambda invocation.
+    """Determine the upstream context for the current Lambda invocation.
 
     See more:
     https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/semantic_conventions/instrumentation/aws-lambda.md#determining-the-parent-of-a-span
@@ -195,30 +201,30 @@ def _determine_parent_context(
     Returns:
         A Context with configuration found in the carrier.
     """
-    parent_context = None
+    upstream_context = None
 
     if not disable_aws_context_propagation:
         xray_env_var = os.environ.get(_X_AMZN_TRACE_ID)
 
         if xray_env_var:
-            parent_context = AwsXRayPropagator().extract(
+            upstream_context = AwsXRayPropagator().extract(
                 {TRACE_HEADER_KEY: xray_env_var}
             )
 
     if (
-        parent_context
-        and get_current_span(parent_context)
+        upstream_context
+        and get_current_span(upstream_context)
         .get_span_context()
         .trace_flags.sampled
     ):
-        return parent_context
+        return upstream_context
 
     if event_context_extractor:
-        parent_context = event_context_extractor(lambda_event)
+        upstream_context = event_context_extractor(lambda_event)
     else:
-        parent_context = _default_event_context_extractor(lambda_event)
+        upstream_context = _default_event_context_extractor(lambda_event)
 
-    return parent_context
+    return upstream_context
 
 
 def _set_api_gateway_v1_proxy_attributes(
@@ -329,7 +335,7 @@ def _set_api_gateway_v2_proxy_attributes(
 def _instrument(
     wrapped_module_name,
     wrapped_function_name,
-    flush_timeout,
+    flush_timeout: int,
     event_context_extractor: Callable[[Any], Context],
     tracer_provider: TracerProvider = None,
     disable_aws_context_propagation: bool = False,
@@ -344,7 +350,7 @@ def _instrument(
 
         lambda_event = args[0]
 
-        parent_context = _determine_parent_context(
+        upstream_context = _determine_upstream_context(
             args,
             event_context_extractor,
             disable_aws_context_propagation,
@@ -372,6 +378,9 @@ def _instrument(
       
         tracer = get_tracer(__name__, __version__, tracer_provider)
 
+        trigger_context = None
+        triggerSpan = None
+
         apiGwSpan = None
         try:
             # If the request came from an API Gateway, extract http attributes from the event
@@ -386,7 +395,7 @@ def _instrument(
                 if lambda_event.get("requestContext") and lambda_event["requestContext"].get("http"):
                     span_name = lambda_event["requestContext"]["http"].get("path")
                 
-                apiGwSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.CLIENT)
+                apiGwSpan = tracer.start_span(span_name, context=upstream_context, kind=SpanKind.CLIENT)
                 if lambda_event.get("version") == "2.0":
                     apiGwSpan.set_attribute("faas.trigger.type", "Api Gateway Rest")
                 else:
@@ -394,7 +403,8 @@ def _instrument(
                 
                 apiGwSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "http")
 
-                parent_context = set_span_in_context(apiGwSpan)
+                triggerSpan = apiGwSpan
+                trigger_context = set_span_in_context(apiGwSpan)
         except Exception as ex:
             pass
         # S3 trigger new span and request attributes
@@ -407,11 +417,12 @@ def _instrument(
                 if lambda_event["Records"][0].get("eventName"):
                     span_name = lambda_event["Records"][0].get("eventName")
 
-                s3TriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.PRODUCER)
+                s3TriggerSpan = tracer.start_span(span_name, context=upstream_context, kind=SpanKind.PRODUCER)
                 s3TriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "datasource")
                 s3TriggerSpan.set_attribute("faas.trigger.type", "S3")
 
-                parent_context = set_span_in_context(s3TriggerSpan)
+                triggerSpan = s3TriggerSpan
+                trigger_context = set_span_in_context(s3TriggerSpan)
 
                 if lambda_event["Records"][0].get("s3"):
                     s3TriggerSpan.set_attribute(
@@ -440,7 +451,7 @@ def _instrument(
                             links.append(Link(span_ctx))
 
                 span_name = orig_handler_name
-                sqsTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.CONSUMER, links=links)
+                sqsTriggerSpan = tracer.start_span(span_name, context=upstream_context, kind=SpanKind.CONSUMER, links=links)
                 sqsTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "pubsub")
                 sqsTriggerSpan.set_attribute("faas.trigger.type", "SQS")
                 sqsTriggerSpan.set_attribute(SpanAttributes.MESSAGING_SYSTEM, "aws.sqs")
@@ -451,8 +462,9 @@ def _instrument(
                     sqsTriggerSpan.set_attribute(SpanAttributes.MESSAGING_DESTINATION, queue_url.split(":")[-1])
                 except IndexError:
                     pass
-
-                parent_context = set_span_in_context(sqsTriggerSpan)
+                
+                triggerSpan = sqsTriggerSpan
+                trigger_context = set_span_in_context(sqsTriggerSpan)
 
                 if lambda_event["Records"][0].get("body"):
                     sqsTriggerSpan.set_attribute(
@@ -484,7 +496,7 @@ def _instrument(
 
                 span_kind = SpanKind.INTERNAL
                 span_name = orig_handler_name
-                snsTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.CONSUMER, links=links)
+                snsTriggerSpan = tracer.start_span(span_name, context=upstream_context, kind=SpanKind.CONSUMER, links=links)
                 snsTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "pubsub")
                 snsTriggerSpan.set_attribute("faas.trigger.type", "SNS")
                 snsTriggerSpan.set_attribute(SpanAttributes.MESSAGING_SYSTEM, "aws.sns")
@@ -496,7 +508,8 @@ def _instrument(
                 except IndexError:
                     pass
 
-                parent_context = set_span_in_context(snsTriggerSpan)
+                triggerSpan = snsTriggerSpan
+                trigger_context = set_span_in_context(snsTriggerSpan)
 
                 if lambda_event["Records"][0]["Sns"] and lambda_event["Records"][0]["Sns"].get("Message"):
                     snsTriggerSpan.set_attribute(
@@ -530,7 +543,7 @@ def _instrument(
                             links.append(Link(span_ctx))
                 span_kind = SpanKind.INTERNAL
                 span_name = orig_handler_name
-                kinesisTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.CONSUMER, links=links)
+                kinesisTriggerSpan = tracer.start_span(span_name, context=upstream_context, kind=SpanKind.CONSUMER, links=links)
                 kinesisTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "pubsub")
                 kinesisTriggerSpan.set_attribute("faas.trigger.type", "Kinesis")
                 kinesisTriggerSpan.set_attribute(SpanAttributes.MESSAGING_SYSTEM, "aws.kinesis")
@@ -542,8 +555,8 @@ def _instrument(
                 except IndexError:
                     pass
 
-
-                parent_context = set_span_in_context(kinesisTriggerSpan)
+                triggerSpan = kinesisTriggerSpan
+                trigger_context = set_span_in_context(kinesisTriggerSpan)
 
                 if lambda_event["Records"][0]["kinesis"] and lambda_event["Records"][0]["kinesis"].get("data"):
                     decoded_bytes = base64.b64decode(lambda_event["Records"][0]["kinesis"].get("data"))
@@ -564,11 +577,12 @@ def _instrument(
                 if lambda_event["Records"][0].get("eventName"):
                     span_name = lambda_event["Records"][0].get("eventName")
 
-                dynamoTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.PRODUCER)
+                dynamoTriggerSpan = tracer.start_span(span_name, context=upstream_context, kind=SpanKind.PRODUCER)
                 dynamoTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "datasource")
                 dynamoTriggerSpan.set_attribute("faas.trigger.type", "Dynamo DB")
 
-                parent_context = set_span_in_context(dynamoTriggerSpan)
+                triggerSpan = dynamoTriggerSpan
+                trigger_context = set_span_in_context(dynamoTriggerSpan)
 
                 if lambda_event["Records"][0].get("dynamodb"):
                     dynamoTriggerSpan.set_attribute(
@@ -585,11 +599,12 @@ def _instrument(
                 if lambda_event.get("eventType"):
                     span_name = lambda_event.get("eventType") 
 
-                cognitoTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.PRODUCER)
+                cognitoTriggerSpan = tracer.start_span(span_name, context=upstream_context, kind=SpanKind.PRODUCER)
                 cognitoTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "datasource")
                 cognitoTriggerSpan.set_attribute("faas.trigger.type", "Cognito")
 
-                parent_context = set_span_in_context(cognitoTriggerSpan)
+                triggerSpan = cognitoTriggerSpan
+                trigger_context = set_span_in_context(cognitoTriggerSpan)
 
                 if lambda_event["datasetRecords"]:
                     cognitoTriggerSpan.set_attribute(
@@ -613,11 +628,13 @@ def _instrument(
                     if span_ctx.span_id != INVALID_SPAN_ID:
                         links.append(Link(span_ctx))
 
-                eventBridgeTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.CONSUMER, links=links)
+                eventBridgeTriggerSpan = tracer.start_span(span_name, context=upstream_context, kind=SpanKind.CONSUMER, links=links)
                 eventBridgeTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "pubsub")
                 eventBridgeTriggerSpan.set_attribute("faas.trigger.type", "EventBridge")
                 eventBridgeTriggerSpan.set_attribute("aws.event.bridge.trigger.source", lambda_event.get("source"))
-                parent_context = set_span_in_context(eventBridgeTriggerSpan)
+
+                triggerSpan = eventBridgeTriggerSpan
+                trigger_context = set_span_in_context(eventBridgeTriggerSpan)
 
                 eventBridgeTriggerSpan.set_attribute(
                     "rpc.request.body",
@@ -625,12 +642,37 @@ def _instrument(
                 )
         except Exception as ex:
             pass
+
+        if triggerSpan is not None:
+            triggerSpan.set_attribute("cx.internal.span.role", "trigger")
  
         try:
-            with tracer.start_as_current_span(
+            if trigger_context is not None:
+                invocation_parent_context = trigger_context
+            else:
+                invocation_parent_context = upstream_context
+
+            invocationSpan = tracer.start_span(
                 name=orig_handler_name,
-                context=parent_context,
+                context=invocation_parent_context,
                 kind=span_kind,
+            )
+            invocationSpan.set_attribute("cx.internal.span.role", "invocation")
+
+            _sendEarlySpans(
+                flush_timeout,
+                tracer,
+                tracer_provider,
+                meter_provider,
+                trigger_parent_context=upstream_context,
+                trigger_span=triggerSpan,
+                invocation_parent_context=invocation_parent_context,
+                invocation_span=invocationSpan,
+            )
+
+            with use_span(
+                span=invocationSpan,
+                end_on_exit=True,
             ) as span:
                 if span.is_recording():
                     lambda_context = args[1]
@@ -682,7 +724,6 @@ def _instrument(
                                 SpanAttributes.HTTP_URL,
                                 lambda_event["requestContext"].get("domainName") + lambda_event["requestContext"].get("http").get("path")
                             )
-                        apiGwSpan.end()
                     try:
                         if lambda_event["Records"][0]["eventSource"] == "aws:sqs":
                             span.set_attribute(SpanAttributes.FAAS_TRIGGER, "pubsub")
@@ -715,7 +756,6 @@ def _instrument(
                             )
                     except Exception:
                         pass
-                    s3TriggerSpan.end()
 
                 # SQS trigger response attributes
                 if lambda_event and sqsTriggerSpan is not None:
@@ -732,7 +772,6 @@ def _instrument(
                             )
                     except Exception:
                         pass
-                    sqsTriggerSpan.end()
 
                 if lambda_event and snsTriggerSpan is not None:
                     try:
@@ -748,7 +787,6 @@ def _instrument(
                             )
                     except Exception:
                         pass
-                    snsTriggerSpan.end()
 
                 if lambda_event and kinesisTriggerSpan is not None:
                     try:
@@ -760,7 +798,6 @@ def _instrument(
                                 )
                     except Exception:
                         pass
-                    kinesisTriggerSpan.end()
 
                 if lambda_event and dynamoTriggerSpan is not None:
                     try:
@@ -776,7 +813,6 @@ def _instrument(
                             )
                     except Exception:
                         pass
-                    dynamoTriggerSpan.end()
 
                 if lambda_event and cognitoTriggerSpan is not None:
                     try:
@@ -792,7 +828,6 @@ def _instrument(
                             )
                     except Exception:
                         pass
-                    cognitoTriggerSpan.end()  
                 
                 if lambda_event and eventBridgeTriggerSpan is not None:
                     try:
@@ -808,66 +843,14 @@ def _instrument(
                             )
                     except Exception:
                         pass
-                    eventBridgeTriggerSpan.end()  
-                    
-            now = time.time()
-            _tracer_provider = tracer_provider or get_tracer_provider()
-            if hasattr(_tracer_provider, "force_flush"):
-                try:
-                    # NOTE: `force_flush` before function quit in case of Lambda freeze.
-                    _tracer_provider.force_flush(flush_timeout)
-                except Exception:  # pylint: disable=broad-except
-                    logger.exception("TracerProvider failed to flush traces")
-            else:
-                logger.warning(
-                    "TracerProvider was missing `force_flush` method. This is necessary in case of a Lambda freeze and would exist in the OTel SDK implementation."
-                )
 
         except Exception as e:
-            if apiGwSpan is not None:
-                apiGwSpan.end()
-            if s3TriggerSpan is not None:
-                s3TriggerSpan.end()
-            if sqsTriggerSpan is not None:
-                sqsTriggerSpan.end()
-            if snsTriggerSpan is not None:
-                snsTriggerSpan.end()
-            if dynamoTriggerSpan is not None:
-                dynamoTriggerSpan.end()
-            if cognitoTriggerSpan is not None:
-                cognitoTriggerSpan.end()
-            if eventBridgeTriggerSpan is not None:
-                eventBridgeTriggerSpan.end()
-            if kinesisTriggerSpan is not None:
-                kinesisTriggerSpan.end()
-
-            now = time.time()
-            _tracer_provider = tracer_provider or get_tracer_provider()
-            if hasattr(_tracer_provider, "force_flush"):
-                try:
-                    # NOTE: `force_flush` before function quit in case of Lambda freeze.
-                    _tracer_provider.force_flush(flush_timeout) 
-                except Exception:  # pylint: disable=broad-except
-                    logger.warning(
-                     "TracerProvider was missing `force_flush` method. This is necessary in case of a Lambda freeze and would exist in the OTel SDK implementation."
-                    )
-                    # pass
-
             raise e
 
-        _meter_provider = meter_provider or get_meter_provider()
-        if hasattr(_meter_provider, "force_flush"):
-            rem = flush_timeout - (time.time() - now) * 1000
-            if rem > 0:
-                try:
-                    # NOTE: `force_flush` before function quit in case of Lambda freeze.
-                    _meter_provider.force_flush(rem)
-                except Exception:  # pylint: disable=broad-except
-                    logger.exception("MeterProvider failed to flush metrics")
-        else:
-            logger.warning(
-                "MeterProvider was missing `force_flush` method. This is necessary in case of a Lambda freeze and would exist in the OTel SDK implementation."
-            )
+        finally:
+            if triggerSpan is not None:
+                triggerSpan.end()
+            _flush(flush_timeout, tracer_provider, meter_provider)
 
         return result
 
@@ -876,6 +859,83 @@ def _instrument(
         wrapped_function_name,
         _instrumented_lambda_handler_call,
     )
+
+def _sendEarlySpans(
+    flush_timeout: int,
+    tracer: Tracer,
+    tracer_provider: TracerProvider,
+    meter_provider: MeterProvider,
+    trigger_parent_context: Context,
+    trigger_span: Span,
+    invocation_parent_context: Context,
+    invocation_span: Span,
+) -> None:
+    if trigger_span is not None:
+        early_trigger = _createEarlySpan(
+            tracer,
+            parent_context=trigger_parent_context,
+            span=trigger_span
+        )
+        early_trigger.end()
+
+    if invocation_span is not None:
+        early_invocation = _createEarlySpan(
+            tracer,
+            parent_context=invocation_parent_context,
+            span=invocation_span
+        )
+        early_invocation.end()
+
+    _flush(flush_timeout, tracer_provider, meter_provider)
+
+def _createEarlySpan(
+    tracer: Tracer,
+    parent_context: Context,
+    span: Span,
+) -> Span:
+    early_span = tracer.start_span(
+        name=span.name,
+        context=parent_context,
+        kind=span.kind,
+        attributes=span.attributes,
+        links = span.links
+    )
+    early_span.set_attribute("cx.internal.span.state", "early")
+    early_span.set_attribute("cx.internal.trace.id", format_trace_id(span.get_span_context().trace_id))
+    early_span.set_attribute("cx.internal.span.id", format_span_id(span.get_span_context().span_id))
+    return early_span
+
+def _flush(
+    flush_timeout: int,
+    tracer_provider: TracerProvider = None,
+    meter_provider: MeterProvider = None,
+) -> None:
+    now = time.time()
+    _tracer_provider = tracer_provider or get_tracer_provider()
+    if hasattr(_tracer_provider, "force_flush"):
+        try:
+            # NOTE: `force_flush` before function quit in case of Lambda freeze.
+            _tracer_provider.force_flush(flush_timeout)
+        except Exception:  # pylint: disable=broad-except
+            logger.exception("TracerProvider failed to flush traces")
+    else:
+        logger.warning(
+            "TracerProvider was missing `force_flush` method. This is necessary in case of a Lambda freeze and would exist in the OTel SDK implementation."
+        )
+
+    _meter_provider = meter_provider or get_meter_provider()
+    if hasattr(_meter_provider, "force_flush"):
+        rem = flush_timeout - (time.time() - now) * 1000
+        if rem > 0:
+            try:
+                # NOTE: `force_flush` before function quit in case of Lambda freeze.
+                _meter_provider.force_flush(rem)
+            except Exception:  # pylint: disable=broad-except
+                logger.exception("MeterProvider failed to flush metrics")
+    else:
+        logger.warning(
+            "MeterProvider was missing `force_flush` method. This is necessary in case of a Lambda freeze and would exist in the OTel SDK implementation."
+        )
 
 
 class AwsLambdaInstrumentor(BaseInstrumentor):
