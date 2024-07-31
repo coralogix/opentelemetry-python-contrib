@@ -886,7 +886,7 @@ def _sendEarlySpans(
         )
         early_invocation.end()
 
-    _flush_traces(flush_timeout, tracer_provider, meter_provider)
+    _flush_traces(flush_timeout, tracer_provider)
 
 def _createEarlySpan(
     tracer: Tracer,
