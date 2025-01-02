@@ -658,17 +658,19 @@ def _instrument(
                 kind=span_kind,
             )
             invocationSpan.set_attribute("cx.internal.span.role", "invocation")
-
-            _sendEarlySpans(
-                flush_timeout,
-                tracer,
-                tracer_provider,
-                meter_provider,
-                trigger_parent_context=upstream_context,
-                trigger_span=triggerSpan,
-                invocation_parent_context=invocation_parent_context,
-                invocation_span=invocationSpan,
-            )
+            try:
+                _sendEarlySpans(
+                    flush_timeout,
+                    tracer,
+                    tracer_provider,
+                    meter_provider,
+                    trigger_parent_context=upstream_context,
+                    trigger_span=triggerSpan,
+                    invocation_parent_context=invocation_parent_context,
+                    invocation_span=invocationSpan,
+                )
+            except Exception as ex:
+                pass
 
             with use_span(
                 span=invocationSpan,
@@ -870,7 +872,7 @@ def _sendEarlySpans(
     invocation_parent_context: Context,
     invocation_span: Span,
 ) -> None:
-    if trigger_span is not None:
+    if trigger_span is not None and hasattr(trigger_span, 'name'):
         early_trigger = _createEarlySpan(
             tracer,
             parent_context=trigger_parent_context,
@@ -878,7 +880,7 @@ def _sendEarlySpans(
         )
         early_trigger.end()
 
-    if invocation_span is not None:
+    if invocation_span is not None and hasattr(invocation_span, 'name'):
         early_invocation = _createEarlySpan(
             tracer,
             parent_context=invocation_parent_context,
