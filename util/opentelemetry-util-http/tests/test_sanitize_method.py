@@ -34,7 +34,7 @@ class TestSanitizeMethod(unittest.TestCase):
         self.assertEqual(method, "NONSTANDARD")
 
     @patch.dict(
-    "os.environ",
+        "os.environ",
         {
             OTEL_PYTHON_INSTRUMENTATION_HTTP_CAPTURE_ALL_METHODS: "1",
         },

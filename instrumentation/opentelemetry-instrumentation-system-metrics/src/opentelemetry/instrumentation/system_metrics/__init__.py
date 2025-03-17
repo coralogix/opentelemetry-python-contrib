@@ -396,6 +396,29 @@ class SystemMetricsInstrumentor(BaseInstrumentor):
                 unit="switches",
             )
 
+        if "process.runtime.thread_count" in self._config:
+            self._meter.create_observable_up_down_counter(
+                name=f"process.runtime.{self._python_implementation}.thread_count",
+                callbacks=[self._get_runtime_thread_count],
+                description="Runtime active threads count",
+            )
+
+        if "process.runtime.cpu.utilization" in self._config:
+            self._meter.create_observable_gauge(
+                name=f"process.runtime.{self._python_implementation}.cpu.utilization",
+                callbacks=[self._get_runtime_cpu_utilization],
+                description="Runtime CPU utilization",
+                unit="1",
+            )
+
+        if "process.runtime.context_switches" in self._config:
+            self._meter.create_observable_counter(
+                name=f"process.runtime.{self._python_implementation}.context_switches",
+                callbacks=[self._get_runtime_context_switches],
+                description="Runtime context switches",
+                unit="switches",
+            )
+
     def _uninstrument(self, **__):
         pass
 

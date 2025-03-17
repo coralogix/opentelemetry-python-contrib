@@ -375,8 +375,13 @@ def _instrument(
                 span_kind = SpanKind.SERVER
         except (IndexError, KeyError, TypeError):
             span_kind = SpanKind.SERVER
-      
-        tracer = get_tracer(__name__, __version__, tracer_provider)
+
+        tracer = get_tracer(
+            __name__,
+            __version__,
+            tracer_provider,
+            schema_url="https://opentelemetry.io/schemas/1.11.0",
+        )
 
         trigger_context = None
         triggerSpan = None

@@ -135,6 +135,7 @@ class BotocoreInstrumentor(BaseInstrumentor):
         super().__init__()
         self.request_hook = None
         self.response_hook = None
+        self.propagator = AwsXRayPropagator()
 
     def instrumentation_dependencies(self) -> Collection[str]:
         return _instruments
@@ -142,11 +143,19 @@ class BotocoreInstrumentor(BaseInstrumentor):
     def _instrument(self, **kwargs):
         # pylint: disable=attribute-defined-outside-init
         self._tracer = get_tracer(
-            __name__, __version__, kwargs.get("tracer_provider")
+            __name__,
+            __version__,
+            kwargs.get("tracer_provider"),
+            schema_url="https://opentelemetry.io/schemas/1.11.0",
         )
 
         self.request_hook = kwargs.get("request_hook")
         self.response_hook = kwargs.get("response_hook")
+
+        propagator = kwargs.get("propagator")
+        if propagator is not None:
+            self.propagator = propagator
+
         wrap_function_wrapper(
             "botocore.client",
             "BaseClient._make_api_call",
@@ -156,12 +165,25 @@ class BotocoreInstrumentor(BaseInstrumentor):
         wrap_function_wrapper(
             "botocore.endpoint",
             "Endpoint.prepare_request",
-            _patched_endpoint_prepare_request,
+            self._patched_endpoint_prepare_request,
         )
 
     def _uninstrument(self, **kwargs):
         unwrap(BaseClient, "_make_api_call")
         unwrap(Endpoint, "prepare_request")
+
+    # pylint: disable=unused-argument
+    def _patched_endpoint_prepare_request(
+        self, wrapped, instance, args, kwargs
+    ):
+        request = args[0]
+        headers = request.headers
+
+        # Only the x-ray header is propagated by AWS services. Using any
+        # other propagator will lose the trace context.
+        self.propagator.inject(headers)
+
+        return wrapped(*args, **kwargs)
 
     # pylint: disable=too-many-branches
     def _patched_api_call(self, original_func, instance, args, kwargs):

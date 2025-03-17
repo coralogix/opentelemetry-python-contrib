@@ -22,7 +22,11 @@ libraries = [
     },
     {
         "library": "aiohttp ~= 3.0",
-        "instrumentation": "opentelemetry-instrumentation-aiohttp-client==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-aiohttp-client==0.42b0",
+    },
+    "aiohttp": {
+        "library": "aiohttp ~= 3.0",
+        "instrumentation": "opentelemetry-instrumentation-aiohttp-server==0.42b0",
     },
     {
         "library": "aiohttp ~= 3.0",
@@ -30,27 +34,35 @@ libraries = [
     },
     {
         "library": "aiopg >= 0.13.0, < 2.0.0",
-        "instrumentation": "opentelemetry-instrumentation-aiopg==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-aiopg==0.42b0",
     },
     {
         "library": "asgiref ~= 3.0",
-        "instrumentation": "opentelemetry-instrumentation-asgi==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-asgi==0.42b0",
     },
     {
         "library": "asyncpg >= 0.12.0",
-        "instrumentation": "opentelemetry-instrumentation-asyncpg==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-asyncpg==0.42b0",
     },
     {
         "library": "boto~=2.0",
-        "instrumentation": "opentelemetry-instrumentation-boto==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-boto==0.42b0",
     },
     {
         "library": "boto3 ~= 1.0",
-        "instrumentation": "opentelemetry-instrumentation-boto3sqs==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-boto3sqs==0.42b0",
     },
     {
         "library": "botocore ~= 1.0",
-        "instrumentation": "opentelemetry-instrumentation-botocore==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-botocore==0.42b0",
+    },
+    "cassandra-driver": {
+        "library": "cassandra-driver ~= 3.25",
+        "instrumentation": "opentelemetry-instrumentation-cassandra==0.42b0",
+    },
+    "scylla-driver": {
+        "library": "scylla-driver ~= 3.25",
+        "instrumentation": "opentelemetry-instrumentation-cassandra==0.42b0",
     },
     {
         "library": "cassandra-driver ~= 3.25",
@@ -62,51 +74,59 @@ libraries = [
     },
     {
         "library": "celery >= 4.0, < 6.0",
-        "instrumentation": "opentelemetry-instrumentation-celery==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-celery==0.42b0",
     },
-    {
-        "library": "confluent-kafka >= 1.8.2, <= 2.3.0",
-        "instrumentation": "opentelemetry-instrumentation-confluent-kafka==0.46b0.dev",
+    "confluent-kafka": {
+        "library": "confluent-kafka >= 1.8.2, <= 2.2.0",
+        "instrumentation": "opentelemetry-instrumentation-confluent-kafka==0.42b0",
     },
     {
         "library": "django >= 1.10",
-        "instrumentation": "opentelemetry-instrumentation-django==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-django==0.42b0",
     },
     {
         "library": "elasticsearch >= 2.0",
-        "instrumentation": "opentelemetry-instrumentation-elasticsearch==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-elasticsearch==0.42b0",
     },
-    {
-        "library": "falcon >= 1.4.1, < 3.1.2",
-        "instrumentation": "opentelemetry-instrumentation-falcon==0.46b0.dev",
+    "falcon": {
+        "library": "falcon >= 1.4.1, < 4.0.0",
+        "instrumentation": "opentelemetry-instrumentation-falcon==0.42b0",
     },
     {
         "library": "fastapi ~= 0.58",
-        "instrumentation": "opentelemetry-instrumentation-fastapi==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-fastapi==0.42b0",
     },
-    {
-        "library": "flask >= 1.0",
-        "instrumentation": "opentelemetry-instrumentation-flask==0.46b0.dev",
+    "flask": {
+        "library": "flask >= 1.0, < 3.0",
+        "instrumentation": "opentelemetry-instrumentation-flask==0.42b0",
+    },
+    "werkzeug": {
+        "library": "werkzeug < 3.0.0",
+        "instrumentation": "opentelemetry-instrumentation-flask==0.42b0",
     },
     {
         "library": "grpcio ~= 1.27",
-        "instrumentation": "opentelemetry-instrumentation-grpc==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-grpc==0.42b0",
     },
-    {
+    "httpx": {
         "library": "httpx >= 0.18.0",
-        "instrumentation": "opentelemetry-instrumentation-httpx==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-httpx==0.42b0",
     },
     {
         "library": "jinja2 >= 2.7, < 4.0",
-        "instrumentation": "opentelemetry-instrumentation-jinja2==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-jinja2==0.42b0",
     },
     {
         "library": "kafka-python >= 2.0",
-        "instrumentation": "opentelemetry-instrumentation-kafka-python==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-kafka-python==0.42b0",
     },
     {
         "library": "mysql-connector-python ~= 8.0",
-        "instrumentation": "opentelemetry-instrumentation-mysql==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-mysql==0.42b0",
+    },
+    "mysqlclient": {
+        "library": "mysqlclient < 3",
+        "instrumentation": "opentelemetry-instrumentation-mysqlclient==0.42b0",
     },
     {
         "library": "mysqlclient < 3",
@@ -114,7 +134,7 @@ libraries = [
     },
     {
         "library": "pika >= 0.12.0",
-        "instrumentation": "opentelemetry-instrumentation-pika==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-pika==0.42b0",
     },
     {
         "library": "psycopg >= 3.1.0",
@@ -122,76 +142,74 @@ libraries = [
     },
     {
         "library": "psycopg2 >= 2.7.3.1",
-        "instrumentation": "opentelemetry-instrumentation-psycopg2==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-psycopg2==0.42b0",
     },
     {
         "library": "pymemcache >= 1.3.5, < 5",
-        "instrumentation": "opentelemetry-instrumentation-pymemcache==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-pymemcache==0.42b0",
     },
     {
         "library": "pymongo >= 3.1, < 5.0",
-        "instrumentation": "opentelemetry-instrumentation-pymongo==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-pymongo==0.42b0",
     },
     {
         "library": "PyMySQL < 2",
-        "instrumentation": "opentelemetry-instrumentation-pymysql==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-pymysql==0.42b0",
     },
     {
         "library": "pyramid >= 1.7",
-        "instrumentation": "opentelemetry-instrumentation-pyramid==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-pyramid==0.42b0",
     },
     {
         "library": "redis >= 2.6",
-        "instrumentation": "opentelemetry-instrumentation-redis==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-redis==0.42b0",
     },
     {
         "library": "remoulade >= 0.50",
-        "instrumentation": "opentelemetry-instrumentation-remoulade==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-remoulade==0.42b0",
     },
     {
         "library": "requests ~= 2.0",
-        "instrumentation": "opentelemetry-instrumentation-requests==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-requests==0.42b0",
     },
     {
         "library": "scikit-learn ~= 0.24.0",
-        "instrumentation": "opentelemetry-instrumentation-sklearn==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-sklearn==0.42b0",
     },
     {
         "library": "sqlalchemy",
-        "instrumentation": "opentelemetry-instrumentation-sqlalchemy==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-sqlalchemy==0.42b0",
     },
     {
         "library": "starlette ~= 0.13.0",
-        "instrumentation": "opentelemetry-instrumentation-starlette==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-starlette==0.42b0",
     },
     {
         "library": "psutil >= 5",
-        "instrumentation": "opentelemetry-instrumentation-system-metrics==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-system-metrics==0.42b0",
     },
     {
         "library": "tornado >= 5.1.1",
-        "instrumentation": "opentelemetry-instrumentation-tornado==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-tornado==0.42b0",
     },
     {
         "library": "tortoise-orm >= 0.17.0",
-        "instrumentation": "opentelemetry-instrumentation-tortoiseorm==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-tortoiseorm==0.42b0",
     },
     {
         "library": "pydantic >= 1.10.2",
-        "instrumentation": "opentelemetry-instrumentation-tortoiseorm==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-tortoiseorm==0.42b0",
     },
-    {
+    "urllib3": {
         "library": "urllib3 >= 1.0.0, < 3.0.0",
-        "instrumentation": "opentelemetry-instrumentation-urllib3==0.46b0.dev",
+        "instrumentation": "opentelemetry-instrumentation-urllib3==0.42b0",
     },
-]
+}
 default_instrumentations = [
-    "opentelemetry-instrumentation-asyncio==0.46b0.dev",
-    "opentelemetry-instrumentation-aws-lambda==0.46b0.dev",
-    "opentelemetry-instrumentation-dbapi==0.46b0.dev",
-    "opentelemetry-instrumentation-logging==0.46b0.dev",
-    "opentelemetry-instrumentation-sqlite3==0.46b0.dev",
-    "opentelemetry-instrumentation-threading==0.46b0.dev",
-    "opentelemetry-instrumentation-urllib==0.46b0.dev",
-    "opentelemetry-instrumentation-wsgi==0.46b0.dev",
+    "opentelemetry-instrumentation-aws-lambda==0.42b0",
+    "opentelemetry-instrumentation-dbapi==0.42b0",
+    "opentelemetry-instrumentation-logging==0.42b0",
+    "opentelemetry-instrumentation-sqlite3==0.42b0",
+    "opentelemetry-instrumentation-urllib==0.42b0",
+    "opentelemetry-instrumentation-wsgi==0.42b0",
 ]

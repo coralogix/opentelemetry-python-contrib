@@ -74,3 +74,4 @@ class TestMetrics(TestBase):
         for metric in metrics:
             for point in list(metric.data.data_points):
                 self.assertEqual(point.count, 1)
+        self.assertIsNone(self.memory_metrics_reader.get_metrics_data())

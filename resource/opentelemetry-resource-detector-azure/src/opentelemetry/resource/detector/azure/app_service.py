@@ -50,6 +50,7 @@ class AzureAppServiceResourceDetector(ResourceDetector):
             azure_resource_uri = _get_azure_resource_uri(website_site_name)
             if azure_resource_uri:
                 attributes[_CLOUD_RESOURCE_ID_RESOURCE_ATTRIBUTE] = azure_resource_uri
+                attributes[ResourceAttributes.CLOUD_RESOURCE_ID] = azure_resource_uri
             for (key, env_var) in _APP_SERVICE_ATTRIBUTE_ENV_VARS.items():
                 value = environ.get(env_var)
                 if value:

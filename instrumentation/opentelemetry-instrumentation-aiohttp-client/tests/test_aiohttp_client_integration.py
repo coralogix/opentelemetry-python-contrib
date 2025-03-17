@@ -141,7 +141,7 @@ class TestAioHttpIntegration(TestBase):
 
     def test_schema_url(self):
         with self.subTest(status_code=200):
-            self._http_request(
+            host, port = self._http_request(
                 trace_config=aiohttp_client.create_trace_config(),
                 url="/test-path?query=param#foobar",
                 status_code=200,

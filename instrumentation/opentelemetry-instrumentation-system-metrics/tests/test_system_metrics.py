@@ -18,12 +18,13 @@ from collections import namedtuple
 from platform import python_implementation
 from unittest import mock, skipIf
 
-from opentelemetry.instrumentation.system_metrics import (
-    SystemMetricsInstrumentor,
-)
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.test.test_base import TestBase
+
+from opentelemetry.instrumentation.system_metrics import (
+    SystemMetricsInstrumentor,
+)
 
 
 def _mock_netconnection():
@@ -96,6 +97,7 @@ class TestSystemMetrics(TestBase):
             for scope_metrics in resource_metrics.scope_metrics:
                 for metric in scope_metrics.metrics:
                     metric_names.append(metric.name)
+        self.assertEqual(len(metric_names), 21)
 
         observer_names = [
             "system.cpu.time",
@@ -115,6 +117,7 @@ class TestSystemMetrics(TestBase):
             "system.thread_count",
             f"process.runtime.{self.implementation}.memory",
             f"process.runtime.{self.implementation}.cpu_time",
+            f"process.runtime.{self.implementation}.gc_count",
             f"process.runtime.{self.implementation}.thread_count",
             f"process.runtime.{self.implementation}.context_switches",
             f"process.runtime.{self.implementation}.cpu.utilization",
@@ -136,6 +139,7 @@ class TestSystemMetrics(TestBase):
         runtime_config = {
             "process.runtime.memory": ["rss", "vms"],
             "process.runtime.cpu.time": ["user", "system"],
+            "process.runtime.gc_count": None,
             "process.runtime.thread_count": None,
             "process.runtime.cpu.utilization": None,
             "process.runtime.context_switches": ["involuntary", "voluntary"],
@@ -154,10 +158,12 @@ class TestSystemMetrics(TestBase):
             for scope_metrics in resource_metrics.scope_metrics:
                 for metric in scope_metrics.metrics:
                     metric_names.append(metric.name)
+        self.assertEqual(len(metric_names), 6)
 
         observer_names = [
             f"process.runtime.{self.implementation}.memory",
             f"process.runtime.{self.implementation}.cpu_time",
+            f"process.runtime.{self.implementation}.gc_count",
             f"process.runtime.{self.implementation}.thread_count",
             f"process.runtime.{self.implementation}.context_switches",
             f"process.runtime.{self.implementation}.cpu.utilization",
@@ -184,9 +190,9 @@ class TestSystemMetrics(TestBase):
                     for data_point in metric.data.data_points:
                         for expect in expected:
                             if (
-                                dict(data_point.attributes)
-                                == expect.attributes
-                                and metric.name == observer_name
+                                    dict(data_point.attributes)
+                                    == expect.attributes
+                                    and metric.name == observer_name
                             ):
                                 self.assertEqual(
                                     data_point.value,
