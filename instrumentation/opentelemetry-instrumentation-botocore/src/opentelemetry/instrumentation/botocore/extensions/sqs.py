@@ -39,9 +39,9 @@ class _SqsExtension(_AwsSdkExtension):
                 attributes["rpc.request.payload"] = payload
 
             try:
-                attributes[
-                    SpanAttributes.MESSAGING_DESTINATION
-                ] = queue_url.split("/")[-1]
+                attributes[SpanAttributes.MESSAGING_DESTINATION] = (
+                    queue_url.split("/")[-1]
+                )
             except IndexError:
                 _logger.error(
                     "Could not extract messaging destination from '%s'",

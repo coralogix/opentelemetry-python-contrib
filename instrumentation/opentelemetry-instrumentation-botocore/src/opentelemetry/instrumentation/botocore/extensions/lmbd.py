@@ -62,9 +62,9 @@ class _OpInvoke(_LambdaOperation):
         cls, call_context: _AwsSdkCallContext, attributes: _AttributeMapT
     ):
         attributes[SpanAttributes.FAAS_INVOKED_PROVIDER] = "aws"
-        attributes[
-            SpanAttributes.FAAS_INVOKED_NAME
-        ] = cls._parse_function_name(call_context)
+        attributes[SpanAttributes.FAAS_INVOKED_NAME] = (
+            cls._parse_function_name(call_context)
+        )
         attributes[SpanAttributes.FAAS_INVOKED_REGION] = call_context.region
         if call_context.params.get("Payload") is not None:
             attributes["rpc.request.body"] = call_context.params.get("Payload")
@@ -100,13 +100,13 @@ class _OpInvoke(_LambdaOperation):
 # Lambda extension
 ################################################################################
 
-_OPERATION_MAPPING = {
+_OPERATION_MAPPING: Dict[str, _LambdaOperation] = {
     op.operation_name(): op
     for op in globals().values()
     if inspect.isclass(op)
     and issubclass(op, _LambdaOperation)
     and not inspect.isabstract(op)
-}  # type: Dict[str, _LambdaOperation]
+}
 
 
 class _LambdaExtension(_AwsSdkExtension):
