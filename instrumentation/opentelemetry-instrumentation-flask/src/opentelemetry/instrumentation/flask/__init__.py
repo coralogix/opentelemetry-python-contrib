@@ -251,7 +251,6 @@ from packaging import version as package_version
 import opentelemetry.instrumentation.wsgi as otel_wsgi
 from opentelemetry import context, trace
 from opentelemetry.instrumentation._semconv import (
-    _METRIC_ATTRIBUTES_SERVER_DURATION_NAME,
     _get_schema_url,
     _HTTPStabilityMode,
     _OpenTelemetrySemanticConventionStability,
@@ -267,7 +266,11 @@ from opentelemetry.instrumentation.propagators import (
 )
 from opentelemetry.instrumentation.utils import _start_internal_or_server_span
 from opentelemetry.metrics import get_meter
+from opentelemetry.semconv.attributes.http_attributes import HTTP_ROUTE
 from opentelemetry.semconv.metrics import MetricInstruments
+from opentelemetry.semconv.metrics.http_metrics import (
+    HTTP_SERVER_REQUEST_DURATION,
+)
 from opentelemetry.semconv.trace import SpanAttributes
 from opentelemetry.util.http import (
     get_excluded_urls,
@@ -338,12 +341,16 @@ def _rewrapped_app(
         )
 
         active_requests_counter.add(1, active_requests_count_attrs)
+        request_route = None
 
         def _start_response(status, response_headers, *args, **kwargs):
             if flask.request and (
                 excluded_urls is None
                 or not excluded_urls.url_disabled(flask.request.url)
             ):
+                nonlocal request_route
+                request_route = flask.request.url_rule
+
                 span = flask.request.environ.get(_ENVIRON_SPAN_KEY)
 
                 propagator = get_global_response_propagator()
@@ -386,6 +393,12 @@ def _rewrapped_app(
             duration_attrs_old = otel_wsgi._parse_duration_attrs(
                 attributes, _HTTPStabilityMode.DEFAULT
             )
+
+            if request_route:
+                duration_attrs_old[SpanAttributes.HTTP_TARGET] = str(
+                    request_route
+                )
+
             duration_histogram_old.record(
                 max(round(duration_s * 1000), 0), duration_attrs_old
             )
@@ -393,6 +406,10 @@ def _rewrapped_app(
             duration_attrs_new = otel_wsgi._parse_duration_attrs(
                 attributes, _HTTPStabilityMode.HTTP
             )
+
+            if request_route:
+                duration_attrs_new[HTTP_ROUTE] = str(request_route)
+
             duration_histogram_new.record(
                 max(duration_s, 0), duration_attrs_new
             )
@@ -541,7 +558,9 @@ class _InstrumentedFlask(flask.Flask):
             __name__,
             __version__,
             _InstrumentedFlask._meter_provider,
-            schema_url="https://opentelemetry.io/schemas/1.11.0",
+            schema_url=_get_schema_url(
+                _InstrumentedFlask._sem_conv_opt_in_mode
+            ),
         )
         duration_histogram_old = None
         if _report_old(_InstrumentedFlask._sem_conv_opt_in_mode):
@@ -553,7 +572,7 @@ class _InstrumentedFlask(flask.Flask):
         duration_histogram_new = None
         if _report_new(_InstrumentedFlask._sem_conv_opt_in_mode):
             duration_histogram_new = meter.create_histogram(
-                name=_METRIC_ATTRIBUTES_SERVER_DURATION_NAME,
+                name=HTTP_SERVER_REQUEST_DURATION,
                 unit="s",
                 description="measures the duration of the inbound HTTP request",
             )
@@ -577,7 +596,9 @@ class _InstrumentedFlask(flask.Flask):
             __name__,
             __version__,
             _InstrumentedFlask._tracer_provider,
-            schema_url="https://opentelemetry.io/schemas/1.11.0",
+            schema_url=_get_schema_url(
+                _InstrumentedFlask._sem_conv_opt_in_mode
+            ),
         )
 
         _before_request = _wrapped_before_request(
@@ -684,7 +705,7 @@ class FlaskInstrumentor(BaseInstrumentor):
             duration_histogram_new = None
             if _report_new(sem_conv_opt_in_mode):
                 duration_histogram_new = meter.create_histogram(
-                    name=_METRIC_ATTRIBUTES_SERVER_DURATION_NAME,
+                    name=HTTP_SERVER_REQUEST_DURATION,
                     unit="s",
                     description="measures the duration of the inbound HTTP request",
                 )

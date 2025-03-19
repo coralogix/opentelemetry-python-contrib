@@ -84,10 +84,6 @@ from opentelemetry.instrumentation.instrumentor import BaseInstrumentor
 from opentelemetry.instrumentation.utils import unwrap
 from opentelemetry.metrics import MeterProvider, get_meter_provider
 from opentelemetry.propagate import get_global_textmap
-from opentelemetry.propagators.aws.aws_xray_propagator import (
-    TRACE_HEADER_KEY,
-    AwsXRayPropagator,
-)
 from opentelemetry.propagators import textmap
 from opentelemetry.semconv.resource import ResourceAttributes
 from opentelemetry.semconv.trace import SpanAttributes
@@ -97,7 +93,6 @@ from opentelemetry.trace import (
     Link,
     Tracer,
     TracerProvider,
-    get_current_span,
     get_tracer,
     get_tracer_provider,
     set_span_in_context,
@@ -123,9 +118,6 @@ _X_AMZN_TRACE_ID = "_X_AMZN_TRACE_ID"
 ORIG_HANDLER = "ORIG_HANDLER"
 OTEL_INSTRUMENTATION_AWS_LAMBDA_FLUSH_TIMEOUT = (
     "OTEL_INSTRUMENTATION_AWS_LAMBDA_FLUSH_TIMEOUT"
-)
-OTEL_LAMBDA_DISABLE_AWS_CONTEXT_PROPAGATION = (
-    "OTEL_LAMBDA_DISABLE_AWS_CONTEXT_PROPAGATION"
 )
 
 
@@ -178,10 +170,9 @@ def _default_event_context_extractor(args: Any) -> Context:
     return get_global_textmap().extract(headers)
 
 
-def _determine_upstream_context(
+def _determine_parent_context(
     lambda_event: Any,
     event_context_extractor: Callable[[Any], Context],
-    disable_aws_context_propagation: bool = False,
 ) -> Context:
     """Determine the upstream context for the current Lambda invocation.
 
@@ -195,36 +186,14 @@ def _determine_upstream_context(
             Event as input and extracts an OTel Context from it. By default,
             the context is extracted from the HTTP headers of an API Gateway
             request.
-        disable_aws_context_propagation: By default, this instrumentation
-            will try to read the context from the `_X_AMZN_TRACE_ID` environment
-            variable set by Lambda, set this to `True` to disable this behavior.
     Returns:
         A Context with configuration found in the carrier.
     """
-    upstream_context = None
 
-    if not disable_aws_context_propagation:
-        xray_env_var = os.environ.get(_X_AMZN_TRACE_ID)
+    if event_context_extractor is None:
+        return _default_event_context_extractor(lambda_event)
 
-        if xray_env_var:
-            upstream_context = AwsXRayPropagator().extract(
-                {TRACE_HEADER_KEY: xray_env_var}
-            )
-
-    if (
-        upstream_context
-        and get_current_span(upstream_context)
-        .get_span_context()
-        .trace_flags.sampled
-    ):
-        return upstream_context
-
-    if event_context_extractor:
-        upstream_context = event_context_extractor(lambda_event)
-    else:
-        upstream_context = _default_event_context_extractor(lambda_event)
-
-    return upstream_context
+    return event_context_extractor(lambda_event)
 
 
 def _set_api_gateway_v1_proxy_attributes(
@@ -338,27 +307,31 @@ def _instrument(
     flush_timeout: int,
     event_context_extractor: Callable[[Any], Context],
     tracer_provider: TracerProvider = None,
-    disable_aws_context_propagation: bool = False,
     meter_provider: MeterProvider = None,
 ):
+
+    # pylint: disable=too-many-locals
+    # pylint: disable=too-many-statements
     def _instrumented_lambda_handler_call(  # noqa pylint: disable=too-many-branches
         call_wrapped, instance, args, kwargs
     ):
+
         orig_handler_name = ".".join(
             [wrapped_module_name, wrapped_function_name]
         )
 
         lambda_event = args[0]
 
-        upstream_context = _determine_upstream_context(
+        parent_context = _determine_parent_context(
             args,
             event_context_extractor,
-            disable_aws_context_propagation,
         )
 
-        span_kind = None
         try:
-            if lambda_event["Records"][0]["eventSource"] in {
+            event_source = lambda_event["Records"][0].get(
+                "eventSource"
+            ) or lambda_event["Records"][0].get("EventSource")
+            if event_source in {
                 "aws:sqs",
                 "aws:s3",
                 "aws:sns",
@@ -395,7 +368,7 @@ def _instrument(
                 if lambda_event.get("requestContext") and lambda_event["requestContext"].get("http"):
                     span_name = lambda_event["requestContext"]["http"].get("path")
                 
-                apiGwSpan = tracer.start_span(span_name, context=upstream_context, kind=SpanKind.CLIENT)
+                apiGwSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.CLIENT)
                 if lambda_event.get("version") == "2.0":
                     apiGwSpan.set_attribute("faas.trigger.type", "Api Gateway Rest")
                 else:
@@ -417,7 +390,7 @@ def _instrument(
                 if lambda_event["Records"][0].get("eventName"):
                     span_name = lambda_event["Records"][0].get("eventName")
 
-                s3TriggerSpan = tracer.start_span(span_name, context=upstream_context, kind=SpanKind.PRODUCER)
+                s3TriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.PRODUCER)
                 s3TriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "datasource")
                 s3TriggerSpan.set_attribute("faas.trigger.type", "S3")
 
@@ -451,7 +424,7 @@ def _instrument(
                             links.append(Link(span_ctx))
 
                 span_name = orig_handler_name
-                sqsTriggerSpan = tracer.start_span(span_name, context=upstream_context, kind=SpanKind.CONSUMER, links=links)
+                sqsTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.CONSUMER, links=links)
                 sqsTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "pubsub")
                 sqsTriggerSpan.set_attribute("faas.trigger.type", "SQS")
                 sqsTriggerSpan.set_attribute(SpanAttributes.MESSAGING_SYSTEM, "aws.sqs")
@@ -496,7 +469,7 @@ def _instrument(
 
                 span_kind = SpanKind.INTERNAL
                 span_name = orig_handler_name
-                snsTriggerSpan = tracer.start_span(span_name, context=upstream_context, kind=SpanKind.CONSUMER, links=links)
+                snsTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.CONSUMER, links=links)
                 snsTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "pubsub")
                 snsTriggerSpan.set_attribute("faas.trigger.type", "SNS")
                 snsTriggerSpan.set_attribute(SpanAttributes.MESSAGING_SYSTEM, "aws.sns")
@@ -543,7 +516,7 @@ def _instrument(
                             links.append(Link(span_ctx))
                 span_kind = SpanKind.INTERNAL
                 span_name = orig_handler_name
-                kinesisTriggerSpan = tracer.start_span(span_name, context=upstream_context, kind=SpanKind.CONSUMER, links=links)
+                kinesisTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.CONSUMER, links=links)
                 kinesisTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "pubsub")
                 kinesisTriggerSpan.set_attribute("faas.trigger.type", "Kinesis")
                 kinesisTriggerSpan.set_attribute(SpanAttributes.MESSAGING_SYSTEM, "aws.kinesis")
@@ -577,7 +550,7 @@ def _instrument(
                 if lambda_event["Records"][0].get("eventName"):
                     span_name = lambda_event["Records"][0].get("eventName")
 
-                dynamoTriggerSpan = tracer.start_span(span_name, context=upstream_context, kind=SpanKind.PRODUCER)
+                dynamoTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.PRODUCER)
                 dynamoTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "datasource")
                 dynamoTriggerSpan.set_attribute("faas.trigger.type", "Dynamo DB")
 
@@ -599,7 +572,7 @@ def _instrument(
                 if lambda_event.get("eventType"):
                     span_name = lambda_event.get("eventType") 
 
-                cognitoTriggerSpan = tracer.start_span(span_name, context=upstream_context, kind=SpanKind.PRODUCER)
+                cognitoTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.PRODUCER)
                 cognitoTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "datasource")
                 cognitoTriggerSpan.set_attribute("faas.trigger.type", "Cognito")
 
@@ -628,7 +601,7 @@ def _instrument(
                     if span_ctx.span_id != INVALID_SPAN_ID:
                         links.append(Link(span_ctx))
 
-                eventBridgeTriggerSpan = tracer.start_span(span_name, context=upstream_context, kind=SpanKind.CONSUMER, links=links)
+                eventBridgeTriggerSpan = tracer.start_span(span_name, context=parent_context, kind=SpanKind.CONSUMER, links=links)
                 eventBridgeTriggerSpan.set_attribute(SpanAttributes.FAAS_TRIGGER, "pubsub")
                 eventBridgeTriggerSpan.set_attribute("faas.trigger.type", "EventBridge")
                 eventBridgeTriggerSpan.set_attribute("aws.event.bridge.trigger.source", lambda_event.get("source"))
@@ -650,7 +623,7 @@ def _instrument(
             if trigger_context is not None:
                 invocation_parent_context = trigger_context
             else:
-                invocation_parent_context = upstream_context
+                invocation_parent_context = parent_context
 
             invocationSpan = tracer.start_span(
                 name=orig_handler_name,
@@ -664,7 +637,7 @@ def _instrument(
                     tracer,
                     tracer_provider,
                     meter_provider,
-                    trigger_parent_context=upstream_context,
+                    trigger_parent_context=parent_context,
                     trigger_span=triggerSpan,
                     invocation_parent_context=invocation_parent_context,
                     invocation_span=invocationSpan,
@@ -966,9 +939,6 @@ class AwsLambdaInstrumentor(BaseInstrumentor):
                     Event as input and extracts an OTel Context from it. By default,
                     the context is extracted from the HTTP headers of an API Gateway
                     request.
-                ``disable_aws_context_propagation``: By default, this instrumentation
-                    will try to read the context from the `_X_AMZN_TRACE_ID` environment
-                    variable set by Lambda, set this to `True` to disable this behavior.
         """
         lambda_handler = os.environ.get(ORIG_HANDLER, os.environ.get(_HANDLER))
         # pylint: disable=attribute-defined-outside-init
@@ -990,16 +960,6 @@ class AwsLambdaInstrumentor(BaseInstrumentor):
                 flush_timeout_env,
             )
 
-        disable_aws_context_propagation = kwargs.get(
-            "disable_aws_context_propagation", True
-        ) or os.getenv(
-            OTEL_LAMBDA_DISABLE_AWS_CONTEXT_PROPAGATION, "True"
-        ).strip().lower() in (
-            "true",
-            "1",
-            "t",
-        )
-
         _instrument(
             self._wrapped_module_name,
             self._wrapped_function_name,
@@ -1008,7 +968,6 @@ class AwsLambdaInstrumentor(BaseInstrumentor):
                 "event_context_extractor", _default_event_context_extractor
             ),
             tracer_provider=kwargs.get("tracer_provider"),
-            disable_aws_context_propagation=disable_aws_context_propagation,
             meter_provider=kwargs.get("meter_provider"),
         )
 
