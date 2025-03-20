@@ -272,6 +272,16 @@ class BotocoreInstrumentor(BaseInstrumentor):
                 body = call_context.params.get("Message")
                 if body is not None:
                     attributes["rpc.request.payload"] = json.dumps(body, default=str)
+            elif call_context.service == "kinesis" and (call_context.operation == "PutRecord" or call_context.operation == "PutRecords"):
+                call_context.span_kind = SpanKind.PRODUCER
+                streamName = call_context.params.get("StreamName")
+                if streamName:
+                    attributes[SpanAttributes.MESSAGING_SYSTEM] = "aws.kinesis"
+                    attributes[SpanAttributes.MESSAGING_DESTINATION] = streamName
+                attributes["rpc.request.payload"] = limit_string_size(json.dumps(call_context.params, default=str))
+            elif call_context.service == "sqs" and (call_context.operation == "SendMessageBatch" or call_context.operation == "SendMessage"):
+                call_context.span_kind = SpanKind.PRODUCER
+                attributes["rpc.request.payload"] = limit_string_size(json.dumps(call_context.params, default=str))
             else:
                 attributes["rpc.request.payload"] = json.dumps(call_context.params, default=str)
         except Exception as ex:
@@ -312,6 +322,30 @@ class BotocoreInstrumentor(BaseInstrumentor):
                         args[1]['ClientContext'] = base64.b64encode(jctx.encode('ascii')).decode('ascii')
 
             except Exception as ex:
+                pass
+
+            try:
+                if call_context.service == "kinesis" and call_context.operation == "PutRecord":
+                    if args[1].get("Data") is not None:
+                        detailJson = json.loads(args[1].get("Data"))
+                        detailJson['_context'] = {}
+                        inject(carrier = detailJson['_context'])
+                        args[1]["Data"] = json.dumps(detailJson)
+
+                if call_context.service == "kinesis" and call_context.operation == "PutRecords":
+                    if args[1].get("Records") is not None:
+                        for entry in args[1].get("Records"):
+                            if entry.get("Data") is not None:
+                                detailJson = json.loads(entry.get("Data"))
+                                detailJson['_context'] = {}
+                                inject(carrier = detailJson['_context'])
+                                entry['Data'] = json.dumps(detailJson)
+                            else:
+                                detailJson = {'_context': {}}
+                                inject(carrier = detailJson['_context'])
+                                entry['Data'] = json.dumps(detailJson)
+
+            except Exception as e:
                 pass
 
             try:
