@@ -51,7 +51,7 @@ tracer_provider (TracerProvider) - an optional tracer provider
 request_hook (Callable) - a function with extra user-defined logic to be performed before performing the request
 this function signature is:  def request_hook(span: Span, service_name: str, operation_name: str, api_params: dict) -> None
 response_hook (Callable) - a function with extra user-defined logic to be performed after performing the request
-this function signature is:  def request_hook(span: Span, service_name: str, operation_name: str, result: dict) -> None
+this function signature is:  def response_hook(span: Span, service_name: str, operation_name: str, result: dict) -> None
 
 for example:
 
@@ -79,11 +79,11 @@ for example:
 """
 
 import logging
+from typing import Any, Callable, Collection, Dict, Optional, Tuple
 import json
 import io
 import os
-from opentelemetry.instrumentation.botocore.utils import limit_string_size, get_payload_size_limit
-from typing import Any, Callable, Collection, Dict, Optional, Tuple
+import base64
 
 from botocore.client import BaseClient
 from botocore.endpoint import Endpoint
@@ -91,38 +91,30 @@ from botocore.exceptions import ClientError
 from botocore.response import StreamingBody
 from wrapt import wrap_function_wrapper
 
-from opentelemetry import context as context_api
-
-# FIXME: fix the importing of this private attribute when the location of the _SUPPRESS_HTTP_INSTRUMENTATION_KEY is defined.
-from opentelemetry.context import _SUPPRESS_HTTP_INSTRUMENTATION_KEY
-from opentelemetry.instrumentation.botocore.extensions import _find_extension
+from opentelemetry._events import get_event_logger
+from opentelemetry.instrumentation.botocore.extensions import (
+    _find_extension,
+    _has_extension,
+)
 from opentelemetry.instrumentation.botocore.extensions.types import (
     _AwsSdkCallContext,
+    _AwsSdkExtension,
+    _BotocoreInstrumentorContext,
 )
 from opentelemetry.instrumentation.botocore.package import _instruments
 from opentelemetry.instrumentation.botocore.version import __version__
 from opentelemetry.instrumentation.instrumentor import BaseInstrumentor
 from opentelemetry.instrumentation.utils import (
-    _SUPPRESS_INSTRUMENTATION_KEY,
+    is_instrumentation_enabled,
+    suppress_http_instrumentation,
     unwrap,
 )
-from opentelemetry.propagate import inject
-from opentelemetry.propagators import textmap
+from opentelemetry.propagators.aws.aws_xray_propagator import AwsXRayPropagator
 from opentelemetry.semconv.trace import SpanAttributes
-from opentelemetry.trace import get_tracer, SpanKind
+from opentelemetry.trace import get_tracer
 from opentelemetry.trace.span import Span
-import base64
-import typing
+
 logger = logging.getLogger(__name__)
-
-
-# pylint: disable=unused-argument
-def _patched_endpoint_prepare_request(wrapped, instance, args, kwargs):
-    request = args[0]
-    headers = request.headers
-    inject(headers)
-
-    return wrapped(*args, **kwargs)
 
 
 class BotocoreInstrumentor(BaseInstrumentor):
@@ -135,18 +127,36 @@ class BotocoreInstrumentor(BaseInstrumentor):
         super().__init__()
         self.request_hook = None
         self.response_hook = None
+        self.propagator = AwsXRayPropagator()
 
     def instrumentation_dependencies(self) -> Collection[str]:
         return _instruments
 
     def _instrument(self, **kwargs):
         # pylint: disable=attribute-defined-outside-init
-        self._tracer = get_tracer(
-            __name__, __version__, kwargs.get("tracer_provider")
-        )
+
+        # tracers are lazy initialized per-extension in _get_tracer
+        self._tracers = {}
+        # event_loggers are lazy initialized per-extension in _get_event_logger
+        self._event_loggers = {}
 
         self.request_hook = kwargs.get("request_hook")
         self.response_hook = kwargs.get("response_hook")
+
+        try:
+            self.payload_size_limit = int(os.environ.get("OTEL_PAYLOAD_SIZE_LIMIT", 204800))
+        except ValueError:
+            logger.error(
+                "OTEL_PAYLOAD_SIZE_LIMIT is not a number"
+            )
+
+        propagator = kwargs.get("propagator")
+        if propagator is not None:
+            self.propagator = propagator
+
+        self.tracer_provider = kwargs.get("tracer_provider")
+        self.event_logger_provider = kwargs.get("event_logger_provider")
+
         wrap_function_wrapper(
             "botocore.client",
             "BaseClient._make_api_call",
@@ -156,16 +166,73 @@ class BotocoreInstrumentor(BaseInstrumentor):
         wrap_function_wrapper(
             "botocore.endpoint",
             "Endpoint.prepare_request",
-            _patched_endpoint_prepare_request,
+            self._patched_endpoint_prepare_request,
         )
+
+    @staticmethod
+    def _get_instrumentation_name(extension: _AwsSdkExtension) -> str:
+        has_extension = _has_extension(extension._call_context)
+        return (
+            f"{__name__}.{extension._call_context.service}"
+            if has_extension
+            else __name__
+        )
+
+    def _get_tracer(self, extension: _AwsSdkExtension):
+        """This is a multiplexer in order to have a tracer per extension"""
+
+        instrumentation_name = self._get_instrumentation_name(extension)
+        tracer = self._tracers.get(instrumentation_name)
+        if tracer:
+            return tracer
+
+        schema_version = extension.tracer_schema_version()
+        self._tracers[instrumentation_name] = get_tracer(
+            instrumentation_name,
+            __version__,
+            self.tracer_provider,
+            schema_url=f"https://opentelemetry.io/schemas/{schema_version}",
+        )
+        return self._tracers[instrumentation_name]
+
+    def _get_event_logger(self, extension: _AwsSdkExtension):
+        """This is a multiplexer in order to have an event logger per extension"""
+
+        instrumentation_name = self._get_instrumentation_name(extension)
+        event_logger = self._event_loggers.get(instrumentation_name)
+        if event_logger:
+            return event_logger
+
+        schema_version = extension.event_logger_schema_version()
+        self._event_loggers[instrumentation_name] = get_event_logger(
+            instrumentation_name,
+            "",
+            schema_url=f"https://opentelemetry.io/schemas/{schema_version}",
+            event_logger_provider=self.event_logger_provider,
+        )
+
+        return self._event_loggers[instrumentation_name]
 
     def _uninstrument(self, **kwargs):
         unwrap(BaseClient, "_make_api_call")
         unwrap(Endpoint, "prepare_request")
 
+    # pylint: disable=unused-argument
+    def _patched_endpoint_prepare_request(
+        self, wrapped, instance, args, kwargs
+    ):
+        request = args[0]
+        headers = request.headers
+
+        # Only the x-ray header is propagated by AWS services. Using any
+        # other propagator will lose the trace context.
+        self.propagator.inject(headers)
+
+        return wrapped(*args, **kwargs)
+
     # pylint: disable=too-many-branches
     def _patched_api_call(self, original_func, instance, args, kwargs):
-        if context_api.get_value(_SUPPRESS_INSTRUMENTATION_KEY):
+        if not is_instrumentation_enabled():
             return original_func(*args, **kwargs)
 
         call_context = _determine_call_context(instance, args)
@@ -175,6 +242,7 @@ class BotocoreInstrumentor(BaseInstrumentor):
         extension = _find_extension(call_context)
         if not extension.should_trace_service_call():
             return original_func(*args, **kwargs)
+
         attributes = {
             SpanAttributes.RPC_SYSTEM: "aws-api",
             SpanAttributes.RPC_SERVICE: call_context.service_id,
@@ -182,50 +250,42 @@ class BotocoreInstrumentor(BaseInstrumentor):
             # TODO: update when semantic conventions exist
             "aws.region": call_context.region,
         }
+
         try:
             if call_context.operation == "ListObjects":
                 bucket = call_context.params.get("Bucket")
                 if bucket is not None:
-                    attributes["rpc.request.payload"] = limit_string_size(bucket)
+                    attributes["rpc.request.payload"] = bucket
             elif call_context.operation == "PutObject":
                 body = call_context.params.get("Body")
                 if body is not None:
-                    attributes["rpc.request.payload"] = limit_string_size(body.decode('ascii'))
+                    attributes["rpc.request.payload"] = body.decode('ascii')
             elif call_context.operation == "PutItem":
                 body = call_context.params.get("Item")
                 if body is not None:
-                    attributes["rpc.request.payload"] = limit_string_size(json.dumps(body, default=str))
+                    attributes["rpc.request.payload"] = json.dumps(body, default=str)
             elif call_context.operation == "GetItem":
                 body = call_context.params.get("Key")
                 if body is not None:
-                    attributes["rpc.request.payload"] = limit_string_size(json.dumps(body, default=str))
+                    attributes["rpc.request.payload"] = json.dumps(body, default=str)
             elif call_context.operation == "Publish":
                 body = call_context.params.get("Message")
                 if body is not None:
-                    attributes["rpc.request.payload"] = limit_string_size(json.dumps(body, default=str))
-            elif call_context.service == "events" and call_context.operation == "PutEvents":
-                call_context.span_kind = SpanKind.PRODUCER
-                attributes["rpc.request.payload"] = limit_string_size(json.dumps(call_context.params, default=str))
-            elif call_context.service == "kinesis" and (call_context.operation == "PutRecord" or call_context.operation == "PutRecords"):
-                call_context.span_kind = SpanKind.PRODUCER
-                streamName = call_context.params.get("StreamName")
-                if streamName:
-                    attributes[SpanAttributes.MESSAGING_SYSTEM] = "aws.kinesis"
-                    attributes[SpanAttributes.MESSAGING_DESTINATION] = streamName
-
-                attributes["rpc.request.payload"] = limit_string_size(json.dumps(call_context.params, default=str))
-            elif call_context.service == "sqs" and (call_context.operation == "SendMessageBatch" or call_context.operation == "SendMessage"):
-                call_context.span_kind = SpanKind.PRODUCER
-                attributes["rpc.request.payload"] = limit_string_size(json.dumps(call_context.params, default=str))
+                    attributes["rpc.request.payload"] = json.dumps(body, default=str)
             else:
-                attributes["rpc.request.payload"] = limit_string_size(json.dumps(call_context.params, default=str))
+                attributes["rpc.request.payload"] = json.dumps(call_context.params, default=str)
         except Exception as ex:
             pass
 
         _safe_invoke(extension.extract_attributes, attributes)
         end_span_on_exit = extension.should_end_span_on_exit()
 
-        with self._tracer.start_as_current_span(
+        tracer = self._get_tracer(extension)
+        event_logger = self._get_event_logger(extension)
+        instrumentor_ctx = _BotocoreInstrumentorContext(
+            event_logger=event_logger
+        )
+        with tracer.start_as_current_span(
             call_context.span_name,
             kind=call_context.span_kind,
             attributes=attributes,
@@ -233,12 +293,8 @@ class BotocoreInstrumentor(BaseInstrumentor):
             # at a later time after the stream has been consumed
             end_on_exit=end_span_on_exit,
         ) as span:
-            _safe_invoke(extension.before_service_call, span)
+            _safe_invoke(extension.before_service_call, span, instrumentor_ctx)
             self._call_request_hook(span, call_context)
-
-            token = context_api.attach(
-                context_api.set_value(_SUPPRESS_HTTP_INSTRUMENTATION_KEY, True)
-            )
 
             try:
                 if call_context.service == "lambda" and call_context.operation == "Invoke":
@@ -248,6 +304,8 @@ class BotocoreInstrumentor(BaseInstrumentor):
                         jctx = json.dumps(ctx)
                         args[1]['ClientContext'] = base64.b64encode(jctx.encode('ascii')).decode('ascii')
                     else:
+                        #ctx = {'custom': {'traceContext':{}}}
+                        #inject(ctx['custom']['traceContext'])
                         ctx = {'custom': {}}
                         inject(ctx['custom'])
                         jctx = json.dumps(ctx)
@@ -257,80 +315,23 @@ class BotocoreInstrumentor(BaseInstrumentor):
                 pass
 
             try:
-                if call_context.service == "sqs" and call_context.operation == "SendMessage":
-                    if args[1].get("MessageAttributes") is not None:
-                        inject(carrier = args[1].get("MessageAttributes"), setter=SQSSetter())
-                    else:
-                        args[1]['MessageAttributes'] = {}
-                        inject(carrier = args[1].get("MessageAttributes"), setter=SQSSetter())
-                
-                if call_context.service == "sqs" and call_context.operation == "SendMessageBatch":
-                    if args[1].get("Entries") is not None:
-                        for entry in args[1].get("Entries"):
-                            if entry.get("MessageAttributes") is not None:
-                                inject(carrier = entry.get("MessageAttributes"), setter=SQSSetter())
-                            else:
-                                entry['MessageAttributes'] = {}
-                                inject(carrier = entry.get("MessageAttributes"), setter=SQSSetter())
-                            
-            except Exception as ex:
-                pass
-
-            try:
-                if call_context.service == "events" and call_context.operation == "PutEvents":
-                    if args[1].get("Entries") is not None:
-                        for entry in args[1].get("Entries"):
-                            if entry.get("Detail") is not None:
-                                detailJson = json.loads(entry.get("Detail"))
-                                detailJson['_context'] = {}
-                                inject(carrier = detailJson['_context'])
-                                entry['Detail'] = json.dumps(detailJson)
-                            else:
-                                detailJson = {'_context': {}}
-                                inject(carrier = detailJson['_context'])
-                                entry['Detail'] = json.dumps(detailJson)
-            except Exception as ex:
-                pass
-
-            try:
-                if call_context.service == "kinesis" and call_context.operation == "PutRecord":
-                    if args[1].get("Data") is not None:
-                        detailJson = json.loads(args[1].get("Data"))
-                        detailJson['_context'] = {}
-                        inject(carrier = detailJson['_context'])
-                        args[1]["Data"] = json.dumps(detailJson)
-
-                if call_context.service == "kinesis" and call_context.operation == "PutRecords":
-                    if args[1].get("Records") is not None:
-                        for entry in args[1].get("Records"):
-                            if entry.get("Data") is not None:
-                                detailJson = json.loads(entry.get("Data"))
-                                detailJson['_context'] = {}
-                                inject(carrier = detailJson['_context'])
-                                entry['Data'] = json.dumps(detailJson)
-                            else:
-                                detailJson = {'_context': {}}
-                                inject(carrier = detailJson['_context'])
-                                entry['Data'] = json.dumps(detailJson)
-
-            except Exception as e:
-                pass
-
-            result = None
-            try:
-                result = original_func(*args, **kwargs)
-            except ClientError as error:
-                result = getattr(error, "response", None)
-                _apply_response_attributes(span, result)
-                _safe_invoke(extension.on_error, span, error)
-                raise
-            else:
-                _apply_response_attributes(span, result)
-                _safe_invoke(extension.on_success, span, result)
+                with suppress_http_instrumentation():
+                    result = None
+                    try:
+                        result = original_func(*args, **kwargs)
+                    except ClientError as error:
+                        result = getattr(error, "response", None)
+                        _apply_response_attributes(span, result, self.payload_size_limit)
+                        _safe_invoke(
+                            extension.on_error, span, error, instrumentor_ctx
+                        )
+                        raise
+                    _apply_response_attributes(span, result, self.payload_size_limit)
+                    _safe_invoke(
+                        extension.on_success, span, result, instrumentor_ctx
+                    )
             finally:
-                context_api.detach(token)
-                _safe_invoke(extension.after_service_call)
-
+                _safe_invoke(extension.after_service_call, instrumentor_ctx)
                 self._call_response_hook(span, call_context, result)
 
             return result
@@ -355,7 +356,7 @@ class BotocoreInstrumentor(BaseInstrumentor):
         )
 
 
-def _apply_response_attributes(span: Span, result):
+def _apply_response_attributes(span: Span, result, payload_size_limit: int):
     if result is None or not span.is_recording():
         return
 
@@ -385,9 +386,6 @@ def _apply_response_attributes(span: Span, result):
     if status_code is not None:
         span.set_attribute(SpanAttributes.HTTP_STATUS_CODE, status_code)
 
-    #print("result")
-    #print(json.dumps(result, indent=4, sort_keys=True, default=str))
-    #print(json.dumps(metadata, indent=4, sort_keys=True, default=str))
     try:
         headers = metadata.get("HTTPHeaders")
         if headers is not None:
@@ -398,55 +396,39 @@ def _apply_response_attributes(span: Span, result):
                 body = result.get("Body")
                 if buckets is not None:
                     span.set_attribute(
-                        "rpc.response.payload", limit_string_size(json.dumps([b.get("Name") for b in buckets])))
+                        "rpc.response.payload", json.dumps([b.get("Name") for b in buckets]))
                 elif content is not None:
                     span.set_attribute(
-                        "rpc.response.payload", limit_string_size(json.dumps([b.get("Key") for b in content])))
+                        "rpc.response.payload", json.dumps([b.get("Key") for b in content]))
                 elif body is not None:
                     pass
                 else:
                     span.set_attribute(
-                        "rpc.response.payload", limit_string_size(json.dumps(result, default=str)))
-                #elif body is not None:
-                #    try:
-                #        d = {x: result[x] for x in result if x != "Body"}
-                #        payload = copy.deepcopy(d)
-                #        if body._content_length is not None and int(body._content_length) < payload_size_limit:
-                #            strbody = body.read()
-                #            payload['Body'] = strbody1
-                #            body.close()
-                #            result['Body'] = StreamingBody(io.BytesIO(strbody),
-                #                                           content_length=body._content_length)
-                #        else:
-                #            payload['Body'] = ''
-                #        span.set_attribute(
-                #            "rpc.response.payload", json.dumps(payload, default=str))
-                #    except Exception as ex:
-                #        pass
+                        "rpc.response.payload", json.dumps(result, default=str))
             # Lambda Invoke
-            elif result.get("Payload") is not None and result.get("Payload")._content_length is not None and int(result.get("Payload")._content_length) < get_payload_size_limit():
+            elif result.get("Payload") is not None and result.get("Payload")._content_length is not None and int(result.get("Payload")._content_length) < payload_size_limit:
                 length = result.get("Payload")._content_length
                 strbody = result.get("Payload").read()
                 result.get("Payload").close()
                 span.set_attribute(
-                    "rpc.response.payload", limit_string_size(strbody))
+                    "rpc.response.payload", strbody)
                 result['Payload'] = StreamingBody(io.BytesIO(strbody), content_length=length)
             # DynamoDB get item
             elif server == "Server":
                 span.set_attribute(
-                    "rpc.response.payload", limit_string_size(json.dumps(result, default=str)))
+                    "rpc.response.payload", json.dumps(result, default=str))
             else:
                 span.set_attribute(
-                    "rpc.response.payload", limit_string_size(json.dumps(result, default=str)))
+                    "rpc.response.payload", json.dumps(result, default=str))
     except Exception as ex:
         pass
+
 
 
 def _determine_call_context(
     client: BaseClient, args: Tuple[str, Dict[str, Any]]
 ) -> Optional[_AwsSdkCallContext]:
     try:
-
         call_context = _AwsSdkCallContext(client, args)
 
         logger.debug(
@@ -472,20 +454,3 @@ def _safe_invoke(function: Callable, *args):
         logger.error(
             "Error when invoking function '%s'", function_name, exc_info=ex
         )
-
-class SQSSetter():
-    def set(
-        self,
-        carrier: typing.MutableMapping[str, textmap.CarrierValT],
-        key: str,
-        value: textmap.CarrierValT,
-    ) -> None:
-        """Setter implementation to set a value into a dictionary.
-
-        Args:
-            carrier: dictionary in which to set value
-            key: the key used to set the value
-            value: the value to set
-        """
-        val = {"DataType": "String", "StringValue": value}
-        carrier[key] = val

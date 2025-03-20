@@ -26,10 +26,17 @@ from typing import (
 )
 from urllib.parse import urlparse
 
+from google.protobuf import json_format
+
 from opentelemetry._events import Event
 from opentelemetry.instrumentation.vertexai.events import (
+    ChoiceMessage,
+    ChoiceToolCall,
+    FinishReason,
     assistant_event,
+    choice_event,
     system_event,
+    tool_event,
     user_event,
 )
 from opentelemetry.semconv._incubating.attributes import (
@@ -39,13 +46,23 @@ from opentelemetry.semconv.attributes import server_attributes
 from opentelemetry.util.types import AnyValue, AttributeValue
 
 if TYPE_CHECKING:
-    from google.cloud.aiplatform_v1.types import content, tool
+    from google.cloud.aiplatform_v1.types import (
+        content,
+        prediction_service,
+        tool,
+    )
     from google.cloud.aiplatform_v1beta1.types import (
         content as content_v1beta1,
     )
     from google.cloud.aiplatform_v1beta1.types import (
+        prediction_service as prediction_service_v1beta1,
+    )
+    from google.cloud.aiplatform_v1beta1.types import (
         tool as tool_v1beta1,
     )
+
+
+_MODEL = "model"
 
 
 @dataclass(frozen=True)
@@ -137,6 +154,24 @@ def get_genai_request_attributes(
     return attributes
 
 
+def get_genai_response_attributes(
+    response: prediction_service.GenerateContentResponse
+    | prediction_service_v1beta1.GenerateContentResponse,
+) -> dict[str, AttributeValue]:
+    finish_reasons: list[str] = [
+        _map_finish_reason(candidate.finish_reason)
+        for candidate in response.candidates
+    ]
+    # TODO: add gen_ai.response.id once available in the python client
+    # https://github.com/open-telemetry/opentelemetry-python-contrib/issues/3246
+    return {
+        GenAIAttributes.GEN_AI_RESPONSE_MODEL: response.model_version,
+        GenAIAttributes.GEN_AI_RESPONSE_FINISH_REASONS: finish_reasons,
+        GenAIAttributes.GEN_AI_USAGE_INPUT_TOKENS: response.usage_metadata.prompt_token_count,
+        GenAIAttributes.GEN_AI_USAGE_OUTPUT_TOKENS: response.usage_metadata.candidates_token_count,
+    }
+
+
 _MODEL_STRIP_RE = re.compile(
     r"^projects/(.*)/locations/(.*)/publishers/google/models/"
 )
@@ -182,18 +217,95 @@ def request_to_events(
 
     for content in params.contents or []:
         # Assistant message
-        if content.role == "model":
+        if content.role == _MODEL:
             request_content = _parts_to_any_value(
                 capture_content=capture_content, parts=content.parts
             )
 
             yield assistant_event(role=content.role, content=request_content)
-        # Assume user event but role should be "user"
-        else:
-            request_content = _parts_to_any_value(
-                capture_content=capture_content, parts=content.parts
+            continue
+
+        # Tool event
+        #
+        # Function call results can be parts inside of a user Content or in a separate Content
+        # entry without a role. That may cause duplication in a user event, see
+        # https://github.com/open-telemetry/opentelemetry-python-contrib/issues/3280
+        function_responses = [
+            part.function_response
+            for part in content.parts
+            if "function_response" in part
+        ]
+        for idx, function_response in enumerate(function_responses):
+            yield tool_event(
+                id_=f"{function_response.name}_{idx}",
+                role=content.role,
+                content=json_format.MessageToDict(
+                    function_response._pb.response
+                )
+                if capture_content
+                else None,
             )
-            yield user_event(role=content.role, content=request_content)
+
+        if len(function_responses) == len(content.parts):
+            # If the content only contained function responses, don't emit a user event
+            continue
+
+        request_content = _parts_to_any_value(
+            capture_content=capture_content, parts=content.parts
+        )
+        yield user_event(role=content.role, content=request_content)
+
+
+def response_to_events(
+    *,
+    response: prediction_service.GenerateContentResponse
+    | prediction_service_v1beta1.GenerateContentResponse,
+    capture_content: bool,
+) -> Iterable[Event]:
+    for candidate in response.candidates:
+        tool_calls = _extract_tool_calls(
+            candidate=candidate, capture_content=capture_content
+        )
+
+        # The original function_call Part is still duplicated in message, see
+        # https://github.com/open-telemetry/opentelemetry-python-contrib/issues/3280
+        yield choice_event(
+            finish_reason=_map_finish_reason(candidate.finish_reason),
+            index=candidate.index,
+            # default to "model" since Vertex uses that instead of assistant
+            message=ChoiceMessage(
+                role=candidate.content.role or _MODEL,
+                content=_parts_to_any_value(
+                    capture_content=capture_content,
+                    parts=candidate.content.parts,
+                ),
+            ),
+            tool_calls=tool_calls,
+        )
+
+
+def _extract_tool_calls(
+    *,
+    candidate: content.Candidate | content_v1beta1.Candidate,
+    capture_content: bool,
+) -> Iterable[ChoiceToolCall]:
+    for idx, part in enumerate(candidate.content.parts):
+        if "function_call" not in part:
+            continue
+
+        yield ChoiceToolCall(
+            # Make up an id with index since vertex expects the indices to line up instead of
+            # using ids.
+            id=f"{part.function_call.name}_{idx}",
+            function=ChoiceToolCall.Function(
+                name=part.function_call.name,
+                arguments=json_format.MessageToDict(
+                    part.function_call._pb.args
+                )
+                if capture_content
+                else None,
+            ),
+        )
 
 
 def _parts_to_any_value(
@@ -205,6 +317,28 @@ def _parts_to_any_value(
         return None
 
     return [
-        cast("dict[str, AnyValue]", type(part).to_dict(part))  # type: ignore[reportUnknownMemberType]
+        cast(
+            "dict[str, AnyValue]",
+            type(part).to_dict(part, including_default_value_fields=False),  # type: ignore[reportUnknownMemberType]
+        )
         for part in parts
     ]
+
+
+def _map_finish_reason(
+    finish_reason: content.Candidate.FinishReason
+    | content_v1beta1.Candidate.FinishReason,
+) -> FinishReason | str:
+    EnumType = type(finish_reason)  # pylint: disable=invalid-name
+    if (
+        finish_reason is EnumType.FINISH_REASON_UNSPECIFIED
+        or finish_reason is EnumType.OTHER
+    ):
+        return "error"
+    if finish_reason is EnumType.STOP:
+        return "stop"
+    if finish_reason is EnumType.MAX_TOKENS:
+        return "length"
+
+    # If there is no 1:1 mapping to an OTel preferred enum value, use the exact vertex reason
+    return finish_reason.name
