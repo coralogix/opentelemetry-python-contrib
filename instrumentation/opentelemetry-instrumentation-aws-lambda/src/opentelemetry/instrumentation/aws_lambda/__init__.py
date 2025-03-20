@@ -489,8 +489,7 @@ def _instrument(
                         )
         except Exception as ex:
             pass
-        finally:
-            context_api.detach(token)
+
 
         snsTriggerSpan = None
         try:
@@ -659,6 +658,8 @@ def _instrument(
                 )
         except Exception as ex:
             pass
+
+        context_api.detach(token)
 
         if triggerSpan is not None:
             triggerSpan.set_attribute("cx.internal.span.role", "trigger")
