@@ -96,7 +96,7 @@ class _OpInvoke(_LambdaOperation):
             inject(headers)
             payload["headers"] = headers
             call_context.params["Payload"] = json.dumps(payload)
-        except ValueError:
+        except (ValueError, AttributeError):
             pass
 
 ################################################################################
