@@ -42,7 +42,16 @@ def add_extra_attributes(call_context: _AwsSdkCallContext, attributes: Dict[str,
         body = call_context.params.get("Body")
         if body:
             if isinstance(body, bytes):
-                payload = body.decode('ascii')
+                try:
+                    payload = body.decode('ascii')
+                except UnicodeDecodeError:
+                    try:
+                        payload = body.decode('utf-8')
+                    except UnicodeDecodeError:
+                        try:
+                            payload = body.decode('utf-8', errors='replace')
+                        except UnicodeDecodeError:
+                            payload = str(body)
             else:
                 payload = str(body)
             attributes[RPC_REQUEST_PAYLOAD] = limit_string_size(payload)
