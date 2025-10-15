@@ -54,6 +54,7 @@ from .mocks.dynamo_db_event import MOCK_LAMBDA_DYNAMO_DB_EVENT
 from .mocks.s3_event import MOCK_LAMBDA_S3_EVENT
 from .mocks.sns_event import MOCK_LAMBDA_SNS_EVENT
 from .mocks.sqs_event import MOCK_LAMBDA_SQS_EVENT
+from .mocks.step_functions_event import MOCK_LAMBDA_STEP_FUNCTIONS_EVENT
 
 
 class MockLambdaContext:
@@ -739,3 +740,106 @@ class TestAwsLambdaInstrumentorMocks(TestAwsLambdaInstrumentorBase):
         self.assertEqual(event.name, "exception")
 
         exc_env_patch.stop()
+
+    def test_step_functions_event_sets_attributes(self):
+        """Test Step Functions event creates spans with correct attributes"""
+        AwsLambdaInstrumentor().instrument()
+
+        mock_execute_lambda(MOCK_LAMBDA_STEP_FUNCTIONS_EVENT)
+
+        spans = self.memory_exporter.get_finished_spans()
+        self.assertEqual(len(spans), 4)  # Coralogix creates 4 spans: early trigger, early invocation, final invocation, final trigger
+
+        # Find the Step Functions trigger span (should be the one with Step Functions attributes)
+        step_functions_span = None
+        lambda_span = None
+        
+        for span in spans:
+            if span.attributes.get("faas.trigger") == "stepfunctions":
+                step_functions_span = span
+            else:
+                lambda_span = span
+
+        # Verify Step Functions trigger span
+        self.assertIsNotNone(step_functions_span, "Step Functions trigger span not found")
+        self.assertEqual(step_functions_span.kind, SpanKind.SERVER)
+        self.assertSpanHasAttributes(
+            step_functions_span,
+            {
+                SpanAttributes.FAAS_TRIGGER: "stepfunctions",
+                "faas.trigger.type": "Step Functions",
+                "aws.stepfunctions.execution.arn": "arn:aws:states:us-east-1:123456789012:execution:TestStateMachine:test-execution-123",
+                "aws.stepfunctions.execution.name": "test-execution-123",
+                "aws.stepfunctions.execution.type": "execution",
+                "aws.stepfunctions.role.arn": "arn:aws:iam::123456789012:role/StepFunctionsExecutionRole",
+                "aws.stepfunctions.execution.start_time": "2025-10-15T08:30:00.000Z",
+                "aws.stepfunctions.execution.redrive_count": 0,
+                "aws.stepfunctions.state.name": "InvokeLambda",
+                "aws.stepfunctions.state.entered_time": "2025-10-15T08:30:00.000Z",
+                "aws.stepfunctions.state.retry_count": 0,
+                "aws.stepfunctions.state_machine.arn": "arn:aws:states:us-east-1:123456789012:stateMachine:TestStateMachine",
+                "aws.stepfunctions.state_machine.name": "TestStateMachine",
+            },
+        )
+
+        # Verify Lambda handler span
+        self.assertIsNotNone(lambda_span, "Lambda handler span not found")
+        self.assertEqual(lambda_span.kind, SpanKind.SERVER)
+        self.assertSpanHasAttributes(
+            lambda_span,
+            MOCK_LAMBDA_CONTEXT_ATTRIBUTES,
+        )
+
+    def test_step_functions_event_invalid_context(self):
+        """Test Step Functions event with invalid context creates regular Lambda span"""
+        AwsLambdaInstrumentor().instrument()
+
+        # Mock Step Functions event with missing required fields
+        invalid_step_functions_event = {
+            "executionContext": {
+                "Id": "arn:aws:states:us-east-1:123456789012:execution:TestStateMachine:test-execution-123",
+                # Missing Name, RoleArn, StartTime
+            },
+            "stateContext": {
+                "Name": "InvokeLambda",
+                # Missing EnteredTime, RetryCount
+            },
+            "stateMachineContext": {
+                "Id": "arn:aws:states:us-east-1:123456789012:stateMachine:TestStateMachine",
+                # Missing Name
+            }
+        }
+
+        mock_execute_lambda(invalid_step_functions_event)
+
+        spans = self.memory_exporter.get_finished_spans()
+        self.assertEqual(len(spans), 2)  # Still creates 2 spans (invocation + early invocation)
+
+        # Should not have Step Functions trigger span, only regular Lambda spans
+        for span in spans:
+            self.assertNotEqual(span.attributes.get("faas.trigger"), "stepfunctions")
+
+    def test_step_functions_event_partial_context(self):
+        """Test Step Functions event with partial context creates regular Lambda span"""
+        AwsLambdaInstrumentor().instrument()
+
+        # Mock Step Functions event with only executionContext
+        partial_step_functions_event = {
+            "executionContext": {
+                "Id": "arn:aws:states:us-east-1:123456789012:execution:TestStateMachine:test-execution-123",
+                "Name": "test-execution-123",
+                "RoleArn": "arn:aws:iam::123456789012:role/StepFunctionsExecutionRole",
+                "StartTime": "2025-10-15T08:30:00.000Z",
+                "RedriveCount": 0
+            }
+            # Missing stateContext and stateMachineContext
+        }
+
+        mock_execute_lambda(partial_step_functions_event)
+
+        spans = self.memory_exporter.get_finished_spans()
+        self.assertEqual(len(spans), 2)  # Still creates 2 spans (invocation + early invocation)
+
+        # Should not have Step Functions trigger span, only regular Lambda spans
+        for span in spans:
+            self.assertNotEqual(span.attributes.get("faas.trigger"), "stepfunctions")

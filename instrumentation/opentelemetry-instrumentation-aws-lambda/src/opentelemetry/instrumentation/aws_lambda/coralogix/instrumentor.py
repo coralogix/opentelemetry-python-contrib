@@ -18,6 +18,7 @@ from opentelemetry.instrumentation.aws_lambda.coralogix.span.kinesis import Kine
 from opentelemetry.instrumentation.aws_lambda.coralogix.span.s3 import S3Span
 from opentelemetry.instrumentation.aws_lambda.coralogix.span.sns import SNSSpan
 from opentelemetry.instrumentation.aws_lambda.coralogix.span.sqs import SQSSpan
+from opentelemetry.instrumentation.aws_lambda.coralogix.span.step_functions import StepFunctionsSpan
 
 from opentelemetry.instrumentation.aws_lambda.coralogix.logger import cx_exception
 
@@ -51,6 +52,7 @@ def get_cx_instrumentor(
         DynamoSpan,
         CognitoSpan,
         EventBridgeSpan,
+        StepFunctionsSpan,
     ]
 
     try:
