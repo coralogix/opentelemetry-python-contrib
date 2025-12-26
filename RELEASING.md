@@ -22,6 +22,7 @@
 > - opentelemetry-resource-detector-azure
 > - opentelemetry-sdk-extension-aws
 > - opentelemetry-instrumentation-openai-v2
+> - opentelemetry-instrumentation-openai-agents-v2
 > - opentelemetry-instrumentation-vertexai
 > - opentelemetry-instrumentation-google-genai
 > - opentelemetry-instrumentation-langchain
@@ -87,11 +88,13 @@ The workflow will create a pull request that should be merged in order to procee
 > - opentelemetry-resource-detector-azure
 > - opentelemetry-sdk-extension-aws
 > - opentelemetry-instrumentation-openai-v2
+> - opentelemetry-instrumentation-openai-agents-v2
 > - opentelemetry-instrumentation-vertexai
 > - opentelemetry-instrumentation-google-genai
 > - opentelemetry-instrumentation-langchain
 > - opentelemetry-instrumentation-weaviate
 > - opentelemetry-util-genai
+> - opentelemetry-exporter-credential-provider-gcp
 >
 > These libraries are also excluded from the general patch release.
 
