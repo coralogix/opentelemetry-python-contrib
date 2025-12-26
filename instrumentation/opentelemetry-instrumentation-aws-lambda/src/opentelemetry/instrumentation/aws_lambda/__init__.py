@@ -465,7 +465,8 @@ def _instrument(
                             result.get("statusCode"),
                         )
         finally:
-            context_api.detach(token)
+            if token:
+                context_api.detach(token)
             if cx_instrumentor is not None:
                 try:
                     cx_instrumentor.after_run(
@@ -673,5 +674,4 @@ class AwsLambdaInstrumentor(BaseInstrumentor):
             import_module(self._wrapped_module_name),
             self._wrapped_function_name,
         )
-
 
