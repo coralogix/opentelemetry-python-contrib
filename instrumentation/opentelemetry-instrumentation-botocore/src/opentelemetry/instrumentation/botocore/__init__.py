@@ -88,7 +88,7 @@ from botocore.endpoint import Endpoint
 from botocore.exceptions import ClientError
 from wrapt import wrap_function_wrapper
 
-from opentelemetry._events import get_event_logger
+from opentelemetry._logs import get_logger
 from opentelemetry.instrumentation.botocore.extensions import (
     _find_extension,
     _has_extension,
@@ -99,6 +99,7 @@ from opentelemetry.instrumentation.botocore.extensions.types import (
     _BotocoreInstrumentorContext,
 )
 from opentelemetry.instrumentation.botocore.package import _instruments
+from opentelemetry.instrumentation.botocore.utils import get_server_attributes
 from opentelemetry.instrumentation.botocore.version import __version__
 from opentelemetry.instrumentation.instrumentor import BaseInstrumentor
 from opentelemetry.instrumentation.utils import (
@@ -108,6 +109,9 @@ from opentelemetry.instrumentation.utils import (
 )
 from opentelemetry.metrics import Instrument, Meter, get_meter
 from opentelemetry.propagators.aws.aws_xray_propagator import AwsXRayPropagator
+from opentelemetry.semconv._incubating.attributes.cloud_attributes import (
+    CLOUD_REGION,
+)
 from opentelemetry.semconv.trace import SpanAttributes
 from opentelemetry.trace import get_tracer
 from opentelemetry.trace.span import Span
@@ -139,8 +143,8 @@ class BotocoreInstrumentor(BaseInstrumentor):
 
         # tracers are lazy initialized per-extension in _get_tracer
         self._tracers = {}
-        # event_loggers are lazy initialized per-extension in _get_event_logger
-        self._event_loggers = {}
+        # loggers are lazy initialized per-extension in _get_logger
+        self._loggers = {}
         # meters are lazy initialized per-extension in _get_meter
         self._meters = {}
         # metrics are lazy initialized per-extension in _get_metrics
@@ -154,7 +158,7 @@ class BotocoreInstrumentor(BaseInstrumentor):
             self.propagator = propagator
 
         self.tracer_provider = kwargs.get("tracer_provider")
-        self.event_logger_provider = kwargs.get("event_logger_provider")
+        self.logger_provider = kwargs.get("logger_provider")
         self.meter_provider = kwargs.get("meter_provider")
 
         wrap_function_wrapper(
@@ -195,23 +199,23 @@ class BotocoreInstrumentor(BaseInstrumentor):
         )
         return self._tracers[instrumentation_name]
 
-    def _get_event_logger(self, extension: _AwsSdkExtension):
-        """This is a multiplexer in order to have an event logger per extension"""
+    def _get_logger(self, extension: _AwsSdkExtension):
+        """This is a multiplexer in order to have a logger per extension"""
 
         instrumentation_name = self._get_instrumentation_name(extension)
-        event_logger = self._event_loggers.get(instrumentation_name)
-        if event_logger:
-            return event_logger
+        instrumentation_logger = self._loggers.get(instrumentation_name)
+        if instrumentation_logger:
+            return instrumentation_logger
 
         schema_version = extension.event_logger_schema_version()
-        self._event_loggers[instrumentation_name] = get_event_logger(
+        self._loggers[instrumentation_name] = get_logger(
             instrumentation_name,
             "",
             schema_url=f"https://opentelemetry.io/schemas/{schema_version}",
-            event_logger_provider=self.event_logger_provider,
+            logger_provider=self.logger_provider,
         )
 
-        return self._event_loggers[instrumentation_name]
+        return self._loggers[instrumentation_name]
 
     def _get_meter(self, extension: _AwsSdkExtension):
         """This is a multiplexer in order to have a meter per extension"""
@@ -279,8 +283,8 @@ class BotocoreInstrumentor(BaseInstrumentor):
             SpanAttributes.RPC_SYSTEM: "aws-api",
             SpanAttributes.RPC_SERVICE: call_context.service_id,
             SpanAttributes.RPC_METHOD: call_context.operation,
-            # TODO: update when semantic conventions exist
-            "aws.region": call_context.region,
+            CLOUD_REGION: call_context.region,
+            **get_server_attributes(call_context.endpoint_url),
         }
 
         coralogix_helpers.add_extra_attributes(call_context, attributes)
@@ -289,11 +293,10 @@ class BotocoreInstrumentor(BaseInstrumentor):
         end_span_on_exit = extension.should_end_span_on_exit()
 
         tracer = self._get_tracer(extension)
-        event_logger = self._get_event_logger(extension)
         meter = self._get_meter(extension)
         metrics = self._get_metrics(extension, meter)
         instrumentor_ctx = _BotocoreInstrumentorContext(
-            event_logger=event_logger,
+            logger=self._get_logger(extension),
             metrics=metrics,
         )
 

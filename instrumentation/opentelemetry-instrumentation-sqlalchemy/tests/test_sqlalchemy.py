@@ -23,7 +23,11 @@ from sqlalchemy import (
 )
 
 from opentelemetry import trace
-from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
+from opentelemetry.instrumentation.sqlalchemy import (
+    EngineTracer,
+    SQLAlchemyInstrumentor,
+)
+from opentelemetry.instrumentation.utils import suppress_instrumentation
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider, export
 from opentelemetry.semconv.trace import SpanAttributes
@@ -107,7 +111,7 @@ class TestSqlalchemyInstrumentation(TestBase):
     )
     def test_async_trace_integration(self):
         async def run():
-            from sqlalchemy.ext.asyncio import (  # pylint: disable-all
+            from sqlalchemy.ext.asyncio import (  # pylint: disable-all  # noqa: PLC0415
                 create_async_engine,
             )
 
@@ -157,7 +161,9 @@ class TestSqlalchemyInstrumentation(TestBase):
 
     def test_create_engine_wrapper(self):
         SQLAlchemyInstrumentor().instrument()
-        from sqlalchemy import create_engine  # pylint: disable-all
+        from sqlalchemy import (  # noqa: PLC0415
+            create_engine,  # pylint: disable-all
+        )
 
         engine = create_engine("sqlite:///:memory:")
         cnx = engine.connect()
@@ -184,7 +190,9 @@ class TestSqlalchemyInstrumentation(TestBase):
 
     def test_instrument_engine_from_config(self):
         SQLAlchemyInstrumentor().instrument()
-        from sqlalchemy import engine_from_config  # pylint: disable-all
+        from sqlalchemy import (  # noqa: PLC0415
+            engine_from_config,  # pylint: disable-all
+        )
 
         engine = engine_from_config({"sqlalchemy.url": "sqlite:///:memory:"})
         cnx = engine.connect()
@@ -199,7 +207,9 @@ class TestSqlalchemyInstrumentation(TestBase):
             enable_commenter=True,
             commenter_options={"db_framework": False},
         )
-        from sqlalchemy import create_engine  # pylint: disable-all
+        from sqlalchemy import (  # noqa: PLC0415
+            create_engine,  # pylint: disable-all
+        )
 
         engine = create_engine("sqlite:///:memory:")
         cnx = engine.connect()
@@ -227,7 +237,9 @@ class TestSqlalchemyInstrumentation(TestBase):
             commenter_options={"db_framework": False},
             enable_attribute_commenter=True,
         )
-        from sqlalchemy import create_engine  # pylint: disable-all
+        from sqlalchemy import (  # noqa: PLC0415
+            create_engine,  # pylint: disable-all
+        )
 
         engine = create_engine("sqlite:///:memory:")
         cnx = engine.connect()
@@ -257,7 +269,9 @@ class TestSqlalchemyInstrumentation(TestBase):
                 "opentelemetry_values": False,
             },
         )
-        from sqlalchemy import create_engine  # pylint: disable-all
+        from sqlalchemy import (  # noqa: PLC0415
+            create_engine,  # pylint: disable-all
+        )
 
         engine = create_engine("sqlite:///:memory:")
         cnx = engine.connect()
@@ -290,7 +304,9 @@ class TestSqlalchemyInstrumentation(TestBase):
             },
             enable_attribute_commenter=True,
         )
-        from sqlalchemy import create_engine  # pylint: disable-all
+        from sqlalchemy import (  # noqa: PLC0415
+            create_engine,  # pylint: disable-all
+        )
 
         engine = create_engine("sqlite:///:memory:")
         cnx = engine.connect()
@@ -326,7 +342,9 @@ class TestSqlalchemyInstrumentation(TestBase):
         )
 
         SQLAlchemyInstrumentor().instrument(tracer_provider=provider)
-        from sqlalchemy import create_engine  # pylint: disable-all
+        from sqlalchemy import (  # noqa: PLC0415
+            create_engine,  # pylint: disable-all
+        )
 
         engine = create_engine("sqlite:///:memory:")
         cnx = engine.connect()
@@ -349,7 +367,7 @@ class TestSqlalchemyInstrumentation(TestBase):
     def test_create_async_engine_wrapper(self):
         async def run():
             SQLAlchemyInstrumentor().instrument()
-            from sqlalchemy.ext.asyncio import (  # pylint: disable-all
+            from sqlalchemy.ext.asyncio import (  # pylint: disable-all  # noqa: PLC0415
                 create_async_engine,
             )
 
@@ -390,7 +408,7 @@ class TestSqlalchemyInstrumentation(TestBase):
                     "db_framework": False,
                 },
             )
-            from sqlalchemy.ext.asyncio import (  # pylint: disable-all
+            from sqlalchemy.ext.asyncio import (  # pylint: disable-all  # noqa: PLC0415
                 create_async_engine,
             )
 
@@ -429,7 +447,7 @@ class TestSqlalchemyInstrumentation(TestBase):
                 },
                 enable_attribute_commenter=True,
             )
-            from sqlalchemy.ext.asyncio import (  # pylint: disable-all
+            from sqlalchemy.ext.asyncio import (  # pylint: disable-all  # noqa: PLC0415
                 create_async_engine,
             )
 
@@ -470,7 +488,7 @@ class TestSqlalchemyInstrumentation(TestBase):
                     "opentelemetry_values": False,
                 },
             )
-            from sqlalchemy.ext.asyncio import (  # pylint: disable-all
+            from sqlalchemy.ext.asyncio import (  # pylint: disable-all  # noqa: PLC0415
                 create_async_engine,
             )
 
@@ -512,7 +530,7 @@ class TestSqlalchemyInstrumentation(TestBase):
                 },
                 enable_attribute_commenter=True,
             )
-            from sqlalchemy.ext.asyncio import (  # pylint: disable-all
+            from sqlalchemy.ext.asyncio import (  # pylint: disable-all  # noqa: PLC0415
                 create_async_engine,
             )
 
@@ -577,7 +595,7 @@ class TestSqlalchemyInstrumentation(TestBase):
         SQLAlchemyInstrumentor().instrument(
             tracer_provider=self.tracer_provider
         )
-        from sqlalchemy import create_engine
+        from sqlalchemy import create_engine  # noqa: PLC0415
 
         engine = create_engine("sqlite:///:memory:")
 
@@ -605,12 +623,12 @@ class TestSqlalchemyInstrumentation(TestBase):
 
     def test_no_memory_leakage_if_engine_diposed(self):
         SQLAlchemyInstrumentor().instrument()
-        import gc
-        import weakref
+        import gc  # noqa: PLC0415
+        import weakref  # noqa: PLC0415
 
-        from sqlalchemy import create_engine
+        from sqlalchemy import create_engine  # noqa: PLC0415
 
-        from opentelemetry.instrumentation.sqlalchemy.engine import (
+        from opentelemetry.instrumentation.sqlalchemy.engine import (  # noqa: PLC0415
             EngineTracer,
         )
 
@@ -630,3 +648,63 @@ class TestSqlalchemyInstrumentation(TestBase):
         gc.collect()
         assert callback.call_count == 5
         assert len(EngineTracer._remove_event_listener_params) == 0
+
+    def test_suppress_instrumentation_create_engine(self):
+        SQLAlchemyInstrumentor().instrument()
+
+        from sqlalchemy import create_engine  # noqa: PLC0415
+
+        with suppress_instrumentation():
+            engine = create_engine("sqlite:///:memory:")
+
+        self.assertTrue(not isinstance(engine, EngineTracer))
+
+    @pytest.mark.skipif(
+        not sqlalchemy.__version__.startswith("1.4"),
+        reason="only run async tests for 1.4",
+    )
+    def test_suppress_instrumentation_create_async_engine(self):
+        async def run():
+            SQLAlchemyInstrumentor().instrument()
+            from sqlalchemy.ext.asyncio import (  # pylint: disable-all  # noqa: PLC0415
+                create_async_engine,
+            )
+
+            with suppress_instrumentation():
+                engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+
+            self.assertTrue(not isinstance(engine, EngineTracer))
+
+        asyncio.get_event_loop().run_until_complete(run())
+
+    def test_suppress_instrumentation_connect(self):
+        engine = create_engine("sqlite:///:memory:")
+        SQLAlchemyInstrumentor().instrument(
+            engine=engine,
+            tracer_provider=self.tracer_provider,
+        )
+
+        with suppress_instrumentation():
+            with engine.connect():
+                pass
+
+        spans_list = self.memory_exporter.get_finished_spans()
+        self.assertEqual(len(spans_list), 0)
+
+    def test_suppress_instrumentation_cursor_and_metric(self):
+        engine = create_engine("sqlite:///:memory:")
+        SQLAlchemyInstrumentor().instrument(
+            engine=engine,
+            tracer_provider=self.tracer_provider,
+            enable_commenter=True,
+        )
+
+        with suppress_instrumentation():
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1 + 1;")).fetchall()
+
+        spans_list = self.memory_exporter.get_finished_spans()
+        self.assertEqual(len(spans_list), 0)
+
+        metric_list = self.get_sorted_metrics()
+        self.assertEqual(len(metric_list), 0)
