@@ -27,7 +27,11 @@ from opentelemetry.instrumentation.botocore.extensions.types import (
     _BotocoreInstrumentorContext,
 )
 from opentelemetry.propagate import inject
-from opentelemetry.semconv.trace import SpanAttributes
+from opentelemetry.semconv._incubating.attributes.faas_attributes import (
+    FAAS_INVOKED_NAME,
+    FAAS_INVOKED_PROVIDER,
+    FAAS_INVOKED_REGION,
+)
 from opentelemetry.trace.span import Span
 
 
