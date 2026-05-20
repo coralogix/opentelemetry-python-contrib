@@ -376,14 +376,33 @@ def _instrument(
     def _instrumented_lambda_handler_call(  # noqa pylint: disable=too-many-branches
         call_wrapped, instance, args, kwargs
     ):
-        lambda_event: Any = args[0]
-        lambda_context: LambdaContext = args[1]
+        orig_handler_name = ".".join(
+            [wrapped_module_name, wrapped_function_name]
+        )
+
+        lambda_event = args[0]
 
         parent_context = cx_context.determine_parent_context(
             lambda_event,
             event_context_extractor,
             _determine_parent_context,  # type: ignore[arg-type]
         )
+
+        try:
+            event_source = lambda_event["Records"][0].get(
+                "eventSource"
+            ) or lambda_event["Records"][0].get("EventSource")
+            if event_source in {
+                "aws:sqs",
+                "aws:s3",
+                "aws:sns",
+                "aws:dynamodb",
+            }:
+                span_kind = SpanKind.CONSUMER
+            else:
+                span_kind = SpanKind.SERVER
+        except (IndexError, KeyError, TypeError):
+            span_kind = SpanKind.SERVER
 
         tracer = get_tracer(
             __name__,
