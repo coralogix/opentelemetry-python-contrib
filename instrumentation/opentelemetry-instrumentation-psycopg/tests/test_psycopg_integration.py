@@ -1,22 +1,12 @@
 # Copyright The OpenTelemetry Authors
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-License-Identifier: Apache-2.0
 
 import asyncio
 import types
 from unittest import IsolatedAsyncioTestCase, mock
 
 import psycopg
+from psycopg.sql import SQL, Composed
 
 import opentelemetry.instrumentation.psycopg
 from opentelemetry.instrumentation.psycopg import PsycopgInstrumentor
@@ -33,6 +23,8 @@ class MockCursor:
 
     callproc = mock.MagicMock(spec=types.MethodType)
     callproc.__name__ = "callproc"
+
+    connection = None
 
     rowcount = "SomeRowCount"
 
@@ -99,7 +91,7 @@ class MockConnection:
         return {"dbname": "test"}
 
 
-class MockAsyncConnection:
+class MockAsyncConnection(psycopg.AsyncConnection):
     commit = mock.MagicMock(spec=types.MethodType)
     commit.__name__ = "commit"
 
@@ -113,11 +105,11 @@ class MockAsyncConnection:
     async def connect(*args, **kwargs):
         return MockAsyncConnection(**kwargs)
 
-    def cursor(self):
+    def cursor(self, *args, **kwargs):
         if self.cursor_factory:
             cur = self.cursor_factory(self)
             return cur
-        return MockAsyncCursor()
+        return MockAsyncCursor(*args, **kwargs)
 
     def execute(self, query, params=None, *, prepare=None, binary=False):
         cur = self.cursor()
@@ -178,6 +170,8 @@ class TestPostgresqlIntegration(PostgresqlIntegrationTestMixin, TestBase):
 
         cnx = psycopg.connect(database="test")
 
+        self.assertTrue(issubclass(cnx.cursor_factory, MockCursor))
+
         cursor = cnx.cursor()
 
         query = "SELECT * FROM test"
@@ -209,6 +203,8 @@ class TestPostgresqlIntegration(PostgresqlIntegrationTestMixin, TestBase):
 
         cnx = psycopg.Connection.connect(database="test")
 
+        self.assertTrue(issubclass(cnx.cursor_factory, MockCursor))
+
         cursor = cnx.cursor()
 
         query = "SELECT * FROM test"
@@ -239,6 +235,7 @@ class TestPostgresqlIntegration(PostgresqlIntegrationTestMixin, TestBase):
 
         cnx = psycopg.connect(database="test")
 
+        self.assertTrue(issubclass(cnx.cursor_factory, MockCursor))
         cursor = cnx.cursor()
 
         cursor.execute("Test query", ("param1Value", False))
@@ -267,6 +264,7 @@ class TestPostgresqlIntegration(PostgresqlIntegrationTestMixin, TestBase):
     def test_span_params_attribute(self):
         PsycopgInstrumentor().instrument(capture_parameters=True)
         cnx = psycopg.connect(database="test")
+        self.assertTrue(issubclass(cnx.cursor_factory, MockCursor))
         query = "SELECT * FROM mytable WHERE myparam1 = %s AND myparam2 = %s"
         params = ("test", 42)
 
@@ -311,6 +309,7 @@ class TestPostgresqlIntegration(PostgresqlIntegrationTestMixin, TestBase):
         PsycopgInstrumentor().instrument(tracer_provider=tracer_provider)
 
         cnx = psycopg.connect(database="test")
+        self.assertTrue(issubclass(cnx.cursor_factory, MockCursor))
         cursor = cnx.cursor()
         query = "SELECT * FROM test"
         cursor.execute(query)
@@ -332,11 +331,49 @@ class TestPostgresqlIntegration(PostgresqlIntegrationTestMixin, TestBase):
         self.assertEqual(len(spans_list), 0)
 
         cnx = PsycopgInstrumentor().instrument_connection(cnx)
+
+        self.assertTrue(issubclass(cnx.cursor_factory, MockCursor))
+
         cursor = cnx.cursor()
         cursor.execute(query)
 
         spans_list = self.memory_exporter.get_finished_spans()
         self.assertEqual(len(spans_list), 1)
+
+    def test_instrument_connection_typed_sql_query(self):
+        cnx = psycopg.connect(database="test")
+        query = SQL("SELECT * FROM test")
+
+        cnx = PsycopgInstrumentor().instrument_connection(cnx)
+
+        self.assertTrue(issubclass(cnx.cursor_factory, MockCursor))
+
+        cursor = cnx.cursor()
+        cursor.execute(query)
+
+        spans_list = self.memory_exporter.get_finished_spans()
+        self.assertEqual(len(spans_list), 1)
+        self.assertEqual(spans_list[0].name, "SELECT")
+        self.assertEqual(
+            spans_list[0].attributes["db.statement"], "SELECT * FROM test"
+        )
+
+    def test_instrument_connection_composed_query(self):
+        cnx = psycopg.connect(database="test")
+        query: Composed = SQL("SELECT * FROM test").format()
+
+        cnx = PsycopgInstrumentor().instrument_connection(cnx)
+        self.assertTrue(issubclass(cnx.cursor_factory, MockCursor))
+
+        cursor = cnx.cursor()
+        cursor.execute(query)
+
+        spans_list = self.memory_exporter.get_finished_spans()
+        self.assertEqual(len(spans_list), 1)
+        self.assertEqual(spans_list[0].name, "SELECT")
+        self.assertEqual(
+            spans_list[0].attributes["db.statement"], "SELECT * FROM test"
+        )
 
     # pylint: disable=unused-argument
     def test_instrument_connection_with_instrument(self):
@@ -350,6 +387,7 @@ class TestPostgresqlIntegration(PostgresqlIntegrationTestMixin, TestBase):
 
         PsycopgInstrumentor().instrument()
         cnx = PsycopgInstrumentor().instrument_connection(cnx)
+        self.assertTrue(issubclass(cnx.cursor_factory, MockCursor))
         cursor = cnx.cursor()
         cursor.execute(query)
 
@@ -422,6 +460,9 @@ class TestPostgresqlIntegrationAsync(
         async def test_async_connection():
             acnx = await psycopg.AsyncConnection.connect("test")
             async with acnx as cnx:
+                self.assertTrue(
+                    issubclass(cnx.cursor_factory, MockAsyncCursor)
+                )
                 async with cnx.cursor() as cursor:
                     await cursor.execute("SELECT * FROM test")
 
@@ -450,6 +491,9 @@ class TestPostgresqlIntegrationAsync(
         async def test_async_connection():
             acnx = await psycopg.AsyncConnection.connect("test")
             async with acnx as cnx:
+                self.assertTrue(
+                    issubclass(cnx.cursor_factory, MockAsyncCursor)
+                )
                 await cnx.execute("SELECT * FROM test")
 
         await test_async_connection()
@@ -474,6 +518,7 @@ class TestPostgresqlIntegrationAsync(
         PsycopgInstrumentor().instrument()
 
         cnx = await psycopg.AsyncConnection.connect("test")
+        self.assertTrue(issubclass(cnx.cursor_factory, MockAsyncCursor))
         async with cnx.cursor() as cursor:
             await cursor.execute("Test query", ("param1Value", False))
             await cursor.execute(
@@ -500,6 +545,7 @@ class TestPostgresqlIntegrationAsync(
     async def test_span_params_attribute(self):
         PsycopgInstrumentor().instrument(capture_parameters=True)
         cnx = await psycopg.AsyncConnection.connect("test")
+        self.assertTrue(issubclass(cnx.cursor_factory, MockAsyncCursor))
         query = "SELECT * FROM mytable WHERE myparam1 = %s AND myparam2 = %s"
         params = ("test", 42)
         async with cnx.cursor() as cursor:
@@ -543,6 +589,7 @@ class TestPostgresqlIntegrationAsync(
 
         async def test_async_connection():
             acnx = await psycopg.AsyncConnection.connect("test")
+            self.assertTrue(issubclass(acnx.cursor_factory, MockAsyncCursor))
             async with acnx as cnx:
                 async with cnx.cursor() as cursor:
                     await cursor.execute("SELECT * FROM test", delay=delay)
@@ -557,3 +604,33 @@ class TestPostgresqlIntegrationAsync(
         self.assertGreater(duration, delay * 1e9)
 
         PsycopgInstrumentor().uninstrument()
+
+    async def test_instrument_connection_uses_async_cursor_factory(self):
+        query = b"SELECT * FROM test"
+
+        acnx = await psycopg.AsyncConnection.connect("test")
+        async with acnx:
+            await acnx.execute(query)
+
+        spans_list = self.memory_exporter.get_finished_spans()
+        self.assertEqual(len(spans_list), 0)
+
+        acnx = PsycopgInstrumentor().instrument_connection(acnx)
+
+        self.assertTrue(acnx._is_instrumented_by_opentelemetry)
+
+        # The new cursor_factory should be a subclass of MockAsyncCursor,
+        # the async traced cursor factory returned by _new_cursor_async_factory
+        self.assertTrue(issubclass(acnx.cursor_factory, MockAsyncCursor))
+
+        cursor = acnx.cursor()
+        await cursor.execute(query)
+
+        spans_list = self.memory_exporter.get_finished_spans()
+        self.assertEqual(len(spans_list), 1)
+        span = spans_list[0]
+
+        # Check version and name in span's instrumentation info
+        self.assertEqualSpanInstrumentationScope(
+            span, opentelemetry.instrumentation.psycopg
+        )

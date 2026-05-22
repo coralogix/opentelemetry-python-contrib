@@ -1,22 +1,15 @@
 # Copyright The OpenTelemetry Authors
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-License-Identifier: Apache-2.0
 
-import httpretty
+from unittest import mock
+
 import requests
+from mocket import Mocketizer
+from mocket.mocks.mockhttp import Entry
 
 from opentelemetry.instrumentation.requests import RequestsInstrumentor
 from opentelemetry.semconv._incubating.attributes.user_agent_attributes import (
+    USER_AGENT_ORIGINAL,
     USER_AGENT_SYNTHETIC_TYPE,
     UserAgentSyntheticTypeValues,
 )
@@ -29,13 +22,14 @@ class TestUserAgentSynthetic(TestBase):
     def setUp(self):
         super().setUp()
         RequestsInstrumentor().instrument()
-        httpretty.enable()
-        httpretty.register_uri(httpretty.GET, self.URL, body="Hello!")
+        self.mocketizer = Mocketizer(strict_mode=True)
+        self.mocketizer.enter()
+        Entry.single_register(Entry.GET, self.URL, body="Hello!")
 
     def tearDown(self):
         super().tearDown()
         RequestsInstrumentor().uninstrument()
-        httpretty.disable()
+        self.mocketizer.exit()
 
     def assert_span(self, num_spans=1):
         span_list = self.memory_exporter.get_finished_spans()
@@ -164,4 +158,35 @@ class TestUserAgentSynthetic(TestBase):
         self.assertEqual(
             span.attributes.get(USER_AGENT_SYNTHETIC_TYPE),
             UserAgentSyntheticTypeValues.TEST.value,
+        )
+
+    def test_user_agent_bytes_like_header(self):
+        """Test that bytes-like user agent headers are handled."""
+
+        original_prepare_headers = (
+            requests.models.PreparedRequest.prepare_headers
+        )
+
+        def prepare_headers_bytes(self, headers):
+            original_prepare_headers(self, headers)
+            if "User-Agent" in self.headers:
+                value = self.headers["User-Agent"]
+                if isinstance(value, str):
+                    self.headers["User-Agent"] = value.encode("utf-8")
+
+        headers = {"User-Agent": "AlwaysOn-Monitor/1.0"}
+        with mock.patch(
+            "requests.models.PreparedRequest.prepare_headers",
+            new=prepare_headers_bytes,
+        ):
+            requests.get(self.URL, headers=headers, timeout=5)
+
+        span = self.assert_span()
+        self.assertEqual(
+            span.attributes.get(USER_AGENT_SYNTHETIC_TYPE),
+            UserAgentSyntheticTypeValues.TEST.value,
+        )
+        self.assertEqual(
+            span.attributes.get(USER_AGENT_ORIGINAL),
+            "AlwaysOn-Monitor/1.0",
         )

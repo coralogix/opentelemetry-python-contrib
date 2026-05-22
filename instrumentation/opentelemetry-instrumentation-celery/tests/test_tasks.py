@@ -1,16 +1,5 @@
 # Copyright The OpenTelemetry Authors
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-License-Identifier: Apache-2.0
 
 import threading
 import time
@@ -20,11 +9,22 @@ from wrapt import wrap_function_wrapper
 from opentelemetry import baggage, context
 from opentelemetry.instrumentation.celery import CeleryInstrumentor, utils
 from opentelemetry.instrumentation.utils import unwrap
+from opentelemetry.semconv.attributes.exception_attributes import (
+    EXCEPTION_MESSAGE,
+    EXCEPTION_STACKTRACE,
+    EXCEPTION_TYPE,
+)
 from opentelemetry.semconv.trace import SpanAttributes
 from opentelemetry.test.test_base import TestBase
 from opentelemetry.trace import SpanKind, StatusCode
 
-from .celery_test_tasks import app, task_add, task_raises, task_returns_baggage
+from .celery_test_tasks import (
+    CustomError,
+    app,
+    task_add,
+    task_raises,
+    task_returns_baggage,
+)
 
 
 class TestCeleryInstrumentation(TestBase):
@@ -92,6 +92,24 @@ class TestCeleryInstrumentation(TestBase):
         self.assertEqual(consumer.parent.span_id, producer.context.span_id)
         self.assertEqual(consumer.context.trace_id, producer.context.trace_id)
 
+    def test_task_clears_start_time_cache(self):
+        """Test that the `task_id_to_start_time` cache is cleared after a task finishes,
+        to prevent memory leaks."""
+        instrumentor = CeleryInstrumentor()
+        instrumentor.instrument()
+
+        result = task_add.delay(1, 2)
+
+        timeout = time.time() + 60 * 1  # 1 minutes from now
+        while not result.ready():
+            if time.time() > timeout:
+                break
+            time.sleep(0.05)
+
+        self.assertTrue(result.ready())
+        self.assertEqual(result.result, 3)
+        self.assertEqual(instrumentor.task_id_to_start_time, {})
+
     def test_task_raises(self):
         CeleryInstrumentor().instrument()
 
@@ -127,15 +145,15 @@ class TestCeleryInstrumentation(TestBase):
         self.assertEqual(1, len(consumer.events))
         event = consumer.events[0]
 
-        self.assertIn(SpanAttributes.EXCEPTION_STACKTRACE, event.attributes)
+        self.assertIn(EXCEPTION_STACKTRACE, event.attributes)
 
-        # TODO: use plain assertEqual after 1.25 is released (https://github.com/open-telemetry/opentelemetry-python/pull/3837)
-        self.assertIn(
-            "CustomError", event.attributes[SpanAttributes.EXCEPTION_TYPE]
+        self.assertEqual(
+            f"{CustomError.__module__}.{CustomError.__qualname__}",
+            event.attributes[EXCEPTION_TYPE],
         )
 
         self.assertEqual(
-            event.attributes[SpanAttributes.EXCEPTION_MESSAGE],
+            event.attributes[EXCEPTION_MESSAGE],
             "The task failed!",
         )
 

@@ -1,16 +1,5 @@
 # Copyright The OpenTelemetry Authors
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-License-Identifier: Apache-2.0
 
 # pylint: disable=E0611
 
@@ -39,6 +28,12 @@ from opentelemetry.instrumentation.propagators import (
 from opentelemetry.sdk import resources
 from opentelemetry.sdk.trace import Span
 from opentelemetry.sdk.trace.id_generator import RandomIdGenerator
+from opentelemetry.semconv._incubating.attributes.http_attributes import (
+    HTTP_METHOD,
+    HTTP_SCHEME,
+    HTTP_STATUS_CODE,
+    HTTP_URL,
+)
 from opentelemetry.semconv.attributes.client_attributes import CLIENT_ADDRESS
 from opentelemetry.semconv.attributes.exception_attributes import (
     EXCEPTION_MESSAGE,
@@ -55,7 +50,6 @@ from opentelemetry.semconv.attributes.network_attributes import (
 )
 from opentelemetry.semconv.attributes.server_attributes import SERVER_PORT
 from opentelemetry.semconv.attributes.url_attributes import URL_SCHEME
-from opentelemetry.semconv.trace import SpanAttributes
 from opentelemetry.test.test_base import TestBase
 from opentelemetry.trace import (
     SpanKind,
@@ -171,17 +165,17 @@ class TestMiddlewareAsgi(SimpleTestCase, TestBase):
         self.assertEqual(span.name, "GET ^route/(?P<year>[0-9]{4})/template/$")
         self.assertEqual(span.kind, SpanKind.SERVER)
         self.assertEqual(span.status.status_code, StatusCode.UNSET)
-        self.assertEqual(span.attributes[SpanAttributes.HTTP_METHOD], "GET")
+        self.assertEqual(span.attributes[HTTP_METHOD], "GET")
         self.assertEqual(
-            span.attributes[SpanAttributes.HTTP_URL],
+            span.attributes[HTTP_URL],
             "http://testserver/route/2020/template/",
         )
         self.assertEqual(
-            span.attributes[SpanAttributes.HTTP_ROUTE],
+            span.attributes[HTTP_ROUTE],
             "^route/(?P<year>[0-9]{4})/template/$",
         )
-        self.assertEqual(span.attributes[SpanAttributes.HTTP_SCHEME], "http")
-        self.assertEqual(span.attributes[SpanAttributes.HTTP_STATUS_CODE], 200)
+        self.assertEqual(span.attributes[HTTP_SCHEME], "http")
+        self.assertEqual(span.attributes[HTTP_STATUS_CODE], 200)
 
     async def test_templated_route_get_new_semconv(self):
         await self.async_client.get("/route/2020/template/")
@@ -216,13 +210,13 @@ class TestMiddlewareAsgi(SimpleTestCase, TestBase):
         self.assertEqual(span.name, "GET ^route/(?P<year>[0-9]{4})/template/$")
         self.assertEqual(span.kind, SpanKind.SERVER)
         self.assertEqual(span.status.status_code, StatusCode.UNSET)
-        self.assertEqual(span.attributes[SpanAttributes.HTTP_METHOD], "GET")
+        self.assertEqual(span.attributes[HTTP_METHOD], "GET")
         self.assertEqual(
-            span.attributes[SpanAttributes.HTTP_URL],
+            span.attributes[HTTP_URL],
             "http://testserver/route/2020/template/",
         )
-        self.assertEqual(span.attributes[SpanAttributes.HTTP_SCHEME], "http")
-        self.assertEqual(span.attributes[SpanAttributes.HTTP_STATUS_CODE], 200)
+        self.assertEqual(span.attributes[HTTP_SCHEME], "http")
+        self.assertEqual(span.attributes[HTTP_STATUS_CODE], 200)
         self.assertEqual(span.attributes[HTTP_REQUEST_METHOD], "GET")
         self.assertEqual(span.attributes[SERVER_PORT], 80)
         self.assertEqual(span.attributes[CLIENT_ADDRESS], "127.0.0.1")
@@ -245,16 +239,14 @@ class TestMiddlewareAsgi(SimpleTestCase, TestBase):
         self.assertEqual(span.name, "GET ^traced/")
         self.assertEqual(span.kind, SpanKind.SERVER)
         self.assertEqual(span.status.status_code, StatusCode.UNSET)
-        self.assertEqual(span.attributes[SpanAttributes.HTTP_METHOD], "GET")
+        self.assertEqual(span.attributes[HTTP_METHOD], "GET")
         self.assertEqual(
-            span.attributes[SpanAttributes.HTTP_URL],
+            span.attributes[HTTP_URL],
             "http://testserver/traced/",
         )
-        self.assertEqual(
-            span.attributes[SpanAttributes.HTTP_ROUTE], "^traced/"
-        )
-        self.assertEqual(span.attributes[SpanAttributes.HTTP_SCHEME], "http")
-        self.assertEqual(span.attributes[SpanAttributes.HTTP_STATUS_CODE], 200)
+        self.assertEqual(span.attributes[HTTP_ROUTE], "^traced/")
+        self.assertEqual(span.attributes[HTTP_SCHEME], "http")
+        self.assertEqual(span.attributes[HTTP_STATUS_CODE], 200)
 
     async def test_traced_get_new_semconv(self):
         await self.async_client.get("/traced/")
@@ -286,13 +278,13 @@ class TestMiddlewareAsgi(SimpleTestCase, TestBase):
         self.assertEqual(span.name, "GET ^traced/")
         self.assertEqual(span.kind, SpanKind.SERVER)
         self.assertEqual(span.status.status_code, StatusCode.UNSET)
-        self.assertEqual(span.attributes[SpanAttributes.HTTP_METHOD], "GET")
+        self.assertEqual(span.attributes[HTTP_METHOD], "GET")
         self.assertEqual(
-            span.attributes[SpanAttributes.HTTP_URL],
+            span.attributes[HTTP_URL],
             "http://testserver/traced/",
         )
-        self.assertEqual(span.attributes[SpanAttributes.HTTP_SCHEME], "http")
-        self.assertEqual(span.attributes[SpanAttributes.HTTP_STATUS_CODE], 200)
+        self.assertEqual(span.attributes[HTTP_SCHEME], "http")
+        self.assertEqual(span.attributes[HTTP_STATUS_CODE], 200)
         self.assertEqual(span.attributes[HTTP_REQUEST_METHOD], "GET")
         self.assertEqual(span.attributes[URL_SCHEME], "http")
         self.assertEqual(span.attributes[SERVER_PORT], 80)
@@ -325,16 +317,14 @@ class TestMiddlewareAsgi(SimpleTestCase, TestBase):
         self.assertEqual(span.name, "POST ^traced/")
         self.assertEqual(span.kind, SpanKind.SERVER)
         self.assertEqual(span.status.status_code, StatusCode.UNSET)
-        self.assertEqual(span.attributes[SpanAttributes.HTTP_METHOD], "POST")
+        self.assertEqual(span.attributes[HTTP_METHOD], "POST")
         self.assertEqual(
-            span.attributes[SpanAttributes.HTTP_URL],
+            span.attributes[HTTP_URL],
             "http://testserver/traced/",
         )
-        self.assertEqual(
-            span.attributes[SpanAttributes.HTTP_ROUTE], "^traced/"
-        )
-        self.assertEqual(span.attributes[SpanAttributes.HTTP_SCHEME], "http")
-        self.assertEqual(span.attributes[SpanAttributes.HTTP_STATUS_CODE], 200)
+        self.assertEqual(span.attributes[HTTP_ROUTE], "^traced/")
+        self.assertEqual(span.attributes[HTTP_SCHEME], "http")
+        self.assertEqual(span.attributes[HTTP_STATUS_CODE], 200)
 
     async def test_traced_post_new_semconv(self):
         await self.async_client.post("/traced/")
@@ -366,13 +356,13 @@ class TestMiddlewareAsgi(SimpleTestCase, TestBase):
         self.assertEqual(span.name, "POST ^traced/")
         self.assertEqual(span.kind, SpanKind.SERVER)
         self.assertEqual(span.status.status_code, StatusCode.UNSET)
-        self.assertEqual(span.attributes[SpanAttributes.HTTP_METHOD], "POST")
+        self.assertEqual(span.attributes[HTTP_METHOD], "POST")
         self.assertEqual(
-            span.attributes[SpanAttributes.HTTP_URL],
+            span.attributes[HTTP_URL],
             "http://testserver/traced/",
         )
-        self.assertEqual(span.attributes[SpanAttributes.HTTP_SCHEME], "http")
-        self.assertEqual(span.attributes[SpanAttributes.HTTP_STATUS_CODE], 200)
+        self.assertEqual(span.attributes[HTTP_SCHEME], "http")
+        self.assertEqual(span.attributes[HTTP_STATUS_CODE], 200)
         self.assertEqual(span.attributes[HTTP_REQUEST_METHOD], "POST")
         self.assertEqual(span.attributes[URL_SCHEME], "http")
         self.assertEqual(span.attributes[SERVER_PORT], 80)
@@ -393,24 +383,20 @@ class TestMiddlewareAsgi(SimpleTestCase, TestBase):
         self.assertEqual(span.name, "GET ^error/")
         self.assertEqual(span.kind, SpanKind.SERVER)
         self.assertEqual(span.status.status_code, StatusCode.ERROR)
-        self.assertEqual(span.attributes[SpanAttributes.HTTP_METHOD], "GET")
+        self.assertEqual(span.attributes[HTTP_METHOD], "GET")
         self.assertEqual(
-            span.attributes[SpanAttributes.HTTP_URL],
+            span.attributes[HTTP_URL],
             "http://testserver/error/",
         )
-        self.assertEqual(span.attributes[SpanAttributes.HTTP_ROUTE], "^error/")
-        self.assertEqual(span.attributes[SpanAttributes.HTTP_SCHEME], "http")
-        self.assertEqual(span.attributes[SpanAttributes.HTTP_STATUS_CODE], 500)
+        self.assertEqual(span.attributes[HTTP_ROUTE], "^error/")
+        self.assertEqual(span.attributes[HTTP_SCHEME], "http")
+        self.assertEqual(span.attributes[HTTP_STATUS_CODE], 500)
 
         self.assertEqual(len(span.events), 1)
         event = span.events[0]
         self.assertEqual(event.name, "exception")
-        self.assertEqual(
-            event.attributes[SpanAttributes.EXCEPTION_TYPE], "ValueError"
-        )
-        self.assertEqual(
-            event.attributes[SpanAttributes.EXCEPTION_MESSAGE], "error"
-        )
+        self.assertEqual(event.attributes[EXCEPTION_TYPE], "ValueError")
+        self.assertEqual(event.attributes[EXCEPTION_MESSAGE], "error")
 
     async def test_error_new_semconv(self):
         with self.assertRaises(ValueError):
@@ -447,14 +433,14 @@ class TestMiddlewareAsgi(SimpleTestCase, TestBase):
         self.assertEqual(span.name, "GET ^error/")
         self.assertEqual(span.kind, SpanKind.SERVER)
         self.assertEqual(span.status.status_code, StatusCode.ERROR)
-        self.assertEqual(span.attributes[SpanAttributes.HTTP_METHOD], "GET")
+        self.assertEqual(span.attributes[HTTP_METHOD], "GET")
         self.assertEqual(
-            span.attributes[SpanAttributes.HTTP_URL],
+            span.attributes[HTTP_URL],
             "http://testserver/error/",
         )
-        self.assertEqual(span.attributes[SpanAttributes.HTTP_ROUTE], "^error/")
-        self.assertEqual(span.attributes[SpanAttributes.HTTP_SCHEME], "http")
-        self.assertEqual(span.attributes[SpanAttributes.HTTP_STATUS_CODE], 500)
+        self.assertEqual(span.attributes[HTTP_ROUTE], "^error/")
+        self.assertEqual(span.attributes[HTTP_SCHEME], "http")
+        self.assertEqual(span.attributes[HTTP_STATUS_CODE], 500)
         self.assertEqual(span.attributes[HTTP_REQUEST_METHOD], "GET")
         self.assertEqual(span.attributes[HTTP_ROUTE], "^error/")
         self.assertEqual(span.attributes[URL_SCHEME], "http")
@@ -544,7 +530,7 @@ class TestMiddlewareAsgi(SimpleTestCase, TestBase):
 
         span = span_list[0]
         self.assertEqual(span.name, "HTTP")
-        self.assertEqual(span.attributes[SpanAttributes.HTTP_METHOD], "_OTHER")
+        self.assertEqual(span.attributes[HTTP_METHOD], "_OTHER")
         self.assertEqual(span.attributes[HTTP_REQUEST_METHOD], "_OTHER")
         self.assertEqual(
             span.attributes[HTTP_REQUEST_METHOD_ORIGINAL], "NONSTANDARD"
@@ -644,9 +630,10 @@ class TestMiddlewareAsgi(SimpleTestCase, TestBase):
         )
         trace_id = format_trace_id(span.get_span_context().trace_id)
         span_id = format_span_id(span.get_span_context().span_id)
+        trace_flags = span.get_span_context().trace_flags
         self.assertEqual(
             response["traceresponse"],
-            f"00-{trace_id}-{span_id}-01",
+            f"00-{trace_id}-{span_id}-{trace_flags:02x}",
         )
         self.memory_exporter.clear()
 

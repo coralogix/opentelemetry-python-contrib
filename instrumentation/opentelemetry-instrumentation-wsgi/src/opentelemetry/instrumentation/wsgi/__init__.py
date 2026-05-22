@@ -1,16 +1,5 @@
 # Copyright The OpenTelemetry Authors
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-License-Identifier: Apache-2.0
 """
 This library provides a WSGI middleware that can be used on any WSGI framework
 (such as Django / Flask / Web.py) to track requests timing through OpenTelemetry.
@@ -273,11 +262,11 @@ from opentelemetry.util.http import (
     OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_SERVER_REQUEST,
     OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_SERVER_RESPONSE,
     SanitizeValue,
-    _parse_url_query,
     detect_synthetic_user_agent,
     get_custom_headers,
     normalise_request_header_name,
     normalise_response_header_name,
+    normalize_user_agent,
     redact_url,
     sanitize_method,
 )
@@ -370,7 +359,8 @@ def collect_request_attributes(
     if target is None:  # Note: `"" or None is None`
         target = environ.get("REQUEST_URI")
     if target:
-        path, query = _parse_url_query(target)
+        path = environ.get("PATH_INFO")
+        query = environ.get("QUERY_STRING")
         _set_http_target(result, target, path, query, sem_conv_opt_in_mode)
     else:
         # old semconv v1.20.0
@@ -391,14 +381,7 @@ def collect_request_attributes(
             result, remote_host, sem_conv_opt_in_mode
         )
 
-    user_agent = environ.get("HTTP_USER_AGENT")
-    if user_agent is not None and len(user_agent) > 0:
-        _set_http_user_agent(result, user_agent, sem_conv_opt_in_mode)
-
-        # Check for synthetic user agent type
-        synthetic_type = detect_synthetic_user_agent(user_agent)
-        if synthetic_type:
-            result[USER_AGENT_SYNTHETIC_TYPE] = synthetic_type
+    _apply_user_agent_attributes(result, environ, sem_conv_opt_in_mode)
 
     flavor = environ.get("SERVER_PROTOCOL", "")
     if flavor.upper().startswith(_HTTP_VERSION_PREFIX):
@@ -407,6 +390,25 @@ def collect_request_attributes(
         _set_http_flavor_version(result, flavor, sem_conv_opt_in_mode)
 
     return result
+
+
+def _apply_user_agent_attributes(
+    result: dict[str, str | None],
+    environ: WSGIEnvironment,
+    sem_conv_opt_in_mode: _StabilityMode,
+):
+    user_agent_raw = environ.get("HTTP_USER_AGENT")
+    if not user_agent_raw:
+        return
+
+    user_agent = normalize_user_agent(user_agent_raw)
+    if not user_agent:
+        return
+
+    _set_http_user_agent(result, user_agent, sem_conv_opt_in_mode)
+    synthetic_type = detect_synthetic_user_agent(user_agent)
+    if synthetic_type:
+        result[USER_AGENT_SYNTHETIC_TYPE] = synthetic_type
 
 
 def collect_custom_request_headers_attributes(environ: WSGIEnvironment):
@@ -654,6 +656,7 @@ class OpenTelemetryMiddleware:
         return _start_response
 
     # pylint: disable=too-many-branches
+    # pylint: disable=too-many-locals
     def __call__(
         self, environ: WSGIEnvironment, start_response: StartResponse
     ):
@@ -718,19 +721,24 @@ class OpenTelemetryMiddleware:
             raise
         finally:
             duration_s = default_timer() - start
+            active_metric_ctx = trace.set_span_in_context(span)
             if self.duration_histogram_old:
                 duration_attrs_old = _parse_duration_attrs(
                     req_attrs, _StabilityMode.DEFAULT
                 )
                 self.duration_histogram_old.record(
-                    max(round(duration_s * 1000), 0), duration_attrs_old
+                    max(round(duration_s * 1000), 0),
+                    duration_attrs_old,
+                    context=active_metric_ctx,
                 )
             if self.duration_histogram_new:
                 duration_attrs_new = _parse_duration_attrs(
                     req_attrs, _StabilityMode.HTTP
                 )
                 self.duration_histogram_new.record(
-                    max(duration_s, 0), duration_attrs_new
+                    max(duration_s, 0),
+                    duration_attrs_new,
+                    context=active_metric_ctx,
                 )
             self.active_requests_counter.add(-1, active_requests_count_attrs)
 

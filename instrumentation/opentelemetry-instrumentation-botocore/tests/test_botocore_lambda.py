@@ -1,16 +1,5 @@
 # Copyright The OpenTelemetry Authors
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-License-Identifier: Apache-2.0
 
 import io
 import json
@@ -27,7 +16,12 @@ from opentelemetry.instrumentation.botocore.extensions.lmbd import (
     _LambdaExtension,
 )
 from opentelemetry.propagate import get_global_textmap, set_global_textmap
-from opentelemetry.semconv.trace import SpanAttributes
+from opentelemetry.semconv._incubating.attributes import rpc_attributes
+from opentelemetry.semconv._incubating.attributes.faas_attributes import (
+    FAAS_INVOKED_NAME,
+    FAAS_INVOKED_PROVIDER,
+    FAAS_INVOKED_REGION,
+)
 from opentelemetry.test.mock_textmap import MockTextMapPropagator
 from opentelemetry.test.test_base import TestBase
 from opentelemetry.trace.span import Span
@@ -73,22 +67,16 @@ class TestLambdaExtension(TestBase):
         self.assertEqual(1, len(spans))
 
         span = spans[0]
-        self.assertEqual(operation, span.attributes[SpanAttributes.RPC_METHOD])
-        self.assertEqual("Lambda", span.attributes[SpanAttributes.RPC_SERVICE])
-        self.assertEqual("aws-api", span.attributes[SpanAttributes.RPC_SYSTEM])
+        self.assertEqual(operation, span.attributes[rpc_attributes.RPC_METHOD])
+        self.assertEqual("Lambda", span.attributes[rpc_attributes.RPC_SERVICE])
+        self.assertEqual("aws-api", span.attributes[rpc_attributes.RPC_SYSTEM])
         return span
 
     def assert_invoke_span(self, function_name: str) -> Span:
         span = self.assert_span("Invoke")
-        self.assertEqual(
-            "aws", span.attributes[SpanAttributes.FAAS_INVOKED_PROVIDER]
-        )
-        self.assertEqual(
-            self.region, span.attributes[SpanAttributes.FAAS_INVOKED_REGION]
-        )
-        self.assertEqual(
-            function_name, span.attributes[SpanAttributes.FAAS_INVOKED_NAME]
-        )
+        self.assertEqual("aws", span.attributes[FAAS_INVOKED_PROVIDER])
+        self.assertEqual(self.region, span.attributes[FAAS_INVOKED_REGION])
+        self.assertEqual(function_name, span.attributes[FAAS_INVOKED_NAME])
         return span
 
     @staticmethod
@@ -114,7 +102,7 @@ class TestLambdaExtension(TestBase):
 
         self.client.create_function(
             FunctionName=function_name,
-            Runtime="python3.9",
+            Runtime="python3.10",
             Role=role_arn,
             Handler="lambda_function.lambda_handler",
             Code={
@@ -182,6 +170,4 @@ class TestLambdaExtension(TestBase):
                 attributes = {}
                 extension.extract_attributes(attributes)
 
-                self.assertEqual(
-                    function_name, attributes[SpanAttributes.FAAS_INVOKED_NAME]
-                )
+                self.assertEqual(function_name, attributes[FAAS_INVOKED_NAME])

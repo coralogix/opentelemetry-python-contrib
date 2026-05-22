@@ -1,27 +1,19 @@
 # Copyright The OpenTelemetry Authors
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-License-Identifier: Apache-2.0
+import os
 
 # pylint: disable=protected-access,too-many-lines
-
 import sys
+import unittest
 from collections import namedtuple
 from platform import python_implementation
 from unittest import mock, skipIf
 
 from opentelemetry.instrumentation.system_metrics import (
     _DEFAULT_CONFIG,
+    OTEL_PYTHON_SYSTEM_METRICS_EXCLUDED_METRICS,
     SystemMetricsInstrumentor,
+    _build_default_config,
 )
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
@@ -118,6 +110,7 @@ class TestSystemMetrics(TestBase):
             "process.cpu.time",
             "process.cpu.utilization",
             "process.memory.usage",
+            "process.disk.io",
             "process.memory.virtual",
             "process.thread.count",
             f"process.runtime.{self.implementation}.memory",
@@ -159,6 +152,7 @@ class TestSystemMetrics(TestBase):
             "process.memory.virtual": None,
             "process.open_file_descriptor.count": None,
             "process.thread.count": None,
+            "process.disk.io": ["read", "write"],
         }
 
         reader = InMemoryMetricReader()
@@ -177,6 +171,7 @@ class TestSystemMetrics(TestBase):
             "process.memory.virtual",
             "process.cpu.time",
             "process.thread.count",
+            "process.disk.io",
             "process.context_switches",
             "process.cpu.utilization",
         ]
@@ -895,6 +890,28 @@ class TestSystemMetrics(TestBase):
         expected = [_SystemMetricsResult({}, 42)]
         self._test_metrics("process.thread.count", expected)
 
+    @mock.patch("psutil.Process.io_counters")
+    def test_process_disk_io(self, mock_process_io_counters):
+        PIOCounters = namedtuple("PIOCounters", ["read_bytes", "write_bytes"])
+
+        mock_process_io_counters.configure_mock(
+            **{"return_value": PIOCounters(read_bytes=1024, write_bytes=2048)}
+        )
+
+        expected = [
+            _SystemMetricsResult({"direction": "read"}, 1024),
+            _SystemMetricsResult({"direction": "write"}, 2048),
+        ]
+        self._test_metrics("process.disk.io", expected)
+
+    @mock.patch("psutil.Process.io_counters")
+    def test_process_disk_io_not_implemented_error(
+        self, mock_process_io_counters
+    ):
+        mock_process_io_counters.side_effect = NotImplementedError
+
+        self._assert_metrics_not_found("process.disk.io")
+
     @mock.patch("psutil.Process.cpu_percent")
     @mock.patch("psutil.cpu_count")
     def test_cpu_utilization(self, mock_cpu_count, mock_process_cpu_percent):
@@ -980,9 +997,15 @@ class TestSystemMetrics(TestBase):
             }
         )
         expected_gc_collections = [
-            _SystemMetricsResult({"generation": "0"}, 10),
-            _SystemMetricsResult({"generation": "1"}, 20),
-            _SystemMetricsResult({"generation": "2"}, 30),
+            _SystemMetricsResult(
+                {"cpython.gc.generation": 0, "generation": "0"}, 10
+            ),
+            _SystemMetricsResult(
+                {"cpython.gc.generation": 1, "generation": "1"}, 20
+            ),
+            _SystemMetricsResult(
+                {"cpython.gc.generation": 2, "generation": "2"}, 30
+            ),
         ]
         self._test_metrics(
             "cpython.gc.collections",
@@ -1004,9 +1027,15 @@ class TestSystemMetrics(TestBase):
             }
         )
         expected_gc_collected_objects = [
-            _SystemMetricsResult({"generation": "0"}, 100),
-            _SystemMetricsResult({"generation": "1"}, 200),
-            _SystemMetricsResult({"generation": "2"}, 300),
+            _SystemMetricsResult(
+                {"cpython.gc.generation": 0, "generation": "0"}, 100
+            ),
+            _SystemMetricsResult(
+                {"cpython.gc.generation": 1, "generation": "1"}, 200
+            ),
+            _SystemMetricsResult(
+                {"cpython.gc.generation": 2, "generation": "2"}, 300
+            ),
         ]
         self._test_metrics(
             "cpython.gc.collected_objects",
@@ -1028,9 +1057,15 @@ class TestSystemMetrics(TestBase):
             }
         )
         expected_gc_uncollectable_objects = [
-            _SystemMetricsResult({"generation": "0"}, 1),
-            _SystemMetricsResult({"generation": "1"}, 2),
-            _SystemMetricsResult({"generation": "2"}, 3),
+            _SystemMetricsResult(
+                {"cpython.gc.generation": 0, "generation": "0"}, 1
+            ),
+            _SystemMetricsResult(
+                {"cpython.gc.generation": 1, "generation": "1"}, 2
+            ),
+            _SystemMetricsResult(
+                {"cpython.gc.generation": 2, "generation": "2"}, 3
+            ),
         ]
         self._test_metrics(
             "cpython.gc.uncollectable_objects",
@@ -1091,3 +1126,189 @@ class TestConfigSystemMetrics(TestBase):
             instrumentor.instrument(meter_provider=meter_provider)
             meter_provider.force_flush()
             instrumentor.uninstrument()
+
+
+class TestBuildDefaultConfig(unittest.TestCase):
+    def setUp(self):
+        self.env_patcher = mock.patch.dict("os.environ", {}, clear=False)
+        self.env_patcher.start()
+
+    def tearDown(self):
+        self.env_patcher.stop()
+        os.environ.pop(OTEL_PYTHON_SYSTEM_METRICS_EXCLUDED_METRICS, None)
+
+    def test_default_config_without_exclusions(self):
+        test_cases = [
+            {
+                "name": "no_env_var_set",
+                "env_value": None,
+            },
+            {
+                "name": "empty_string",
+                "env_value": "",
+            },
+            {
+                "name": "whitespace_only",
+                "env_value": "   ",
+            },
+        ]
+
+        for test_case in test_cases:
+            with self.subTest(test_case["name"]):
+                if test_case["env_value"] is None:
+                    # Don't set the environment variable
+                    result = _build_default_config()
+                else:
+                    with mock.patch.dict(
+                        "os.environ",
+                        {
+                            OTEL_PYTHON_SYSTEM_METRICS_EXCLUDED_METRICS: test_case[
+                                "env_value"
+                            ]
+                        },
+                    ):
+                        result = _build_default_config()
+
+                self.assertEqual(result, _DEFAULT_CONFIG)
+
+    def test_exact_metric_exclusions(self):
+        test_cases = [
+            {
+                "name": "single_metric",
+                "pattern": "system.cpu.time",
+                "excluded": ["system.cpu.time"],
+                "included": ["system.cpu.utilization", "system.memory.usage"],
+                "expected_count": len(_DEFAULT_CONFIG) - 1,
+            },
+            {
+                "name": "multiple_metrics",
+                "pattern": "system.cpu.time,system.memory.usage",
+                "excluded": ["system.cpu.time", "system.memory.usage"],
+                "included": ["system.cpu.utilization", "process.cpu.time"],
+                "expected_count": len(_DEFAULT_CONFIG) - 2,
+            },
+            {
+                "name": "with_whitespace",
+                "pattern": "system.cpu.time , system.memory.usage , process.cpu.time",
+                "excluded": [
+                    "system.cpu.time",
+                    "system.memory.usage",
+                    "process.cpu.time",
+                ],
+                "included": ["system.cpu.utilization"],
+                "expected_count": len(_DEFAULT_CONFIG) - 3,
+            },
+            {
+                "name": "non_existent_metric",
+                "pattern": "non.existent.metric",
+                "excluded": [],
+                "included": ["system.cpu.time", "process.cpu.time"],
+                "expected_count": len(_DEFAULT_CONFIG),
+            },
+        ]
+
+        for test_case in test_cases:
+            with self.subTest(test_case["name"]):
+                with mock.patch.dict(
+                    "os.environ",
+                    {
+                        OTEL_PYTHON_SYSTEM_METRICS_EXCLUDED_METRICS: test_case[
+                            "pattern"
+                        ]
+                    },
+                ):
+                    result = _build_default_config()
+
+                    for metric in test_case["excluded"]:
+                        self.assertNotIn(
+                            metric, result, f"{metric} should be excluded"
+                        )
+
+                    for metric in test_case["included"]:
+                        self.assertIn(
+                            metric, result, f"{metric} should be included"
+                        )
+
+                    self.assertEqual(len(result), test_case["expected_count"])
+
+    def test_wildcard_patterns(self):
+        test_cases = [
+            {
+                "name": "all_system_metrics",
+                "pattern": "system.*",
+                "excluded_prefixes": ["system."],
+                "included_prefixes": ["process.", "cpython."],
+            },
+            {
+                "name": "system_cpu_prefix",
+                "pattern": "system.cpu.*",
+                "excluded": ["system.cpu.time", "system.cpu.utilization"],
+                "included": ["system.memory.usage", "system.disk.io"],
+            },
+            {
+                "name": "utilization_suffix",
+                "pattern": "*.utilization",
+                "excluded_suffixes": [".utilization"],
+                "included": ["system.cpu.time", "system.memory.usage"],
+            },
+            {
+                "name": "all_metrics",
+                "pattern": "*",
+                "expected_count": 0,
+            },
+        ]
+
+        for test_case in test_cases:
+            with self.subTest(test_case["name"]):
+                with mock.patch.dict(
+                    "os.environ",
+                    {
+                        OTEL_PYTHON_SYSTEM_METRICS_EXCLUDED_METRICS: test_case[
+                            "pattern"
+                        ]
+                    },
+                ):
+                    result = _build_default_config()
+
+                    if "excluded" in test_case:
+                        for metric in test_case["excluded"]:
+                            self.assertNotIn(metric, result)
+
+                    if "included" in test_case:
+                        for metric in test_case["included"]:
+                            self.assertIn(metric, result)
+
+                    if "excluded_prefixes" in test_case:
+                        for prefix in test_case["excluded_prefixes"]:
+                            excluded_metrics = [
+                                k for k in result if k.startswith(prefix)
+                            ]
+                            self.assertEqual(
+                                len(excluded_metrics),
+                                0,
+                            )
+
+                    if "included_prefixes" in test_case:
+                        for prefix in test_case["included_prefixes"]:
+                            included_metrics = [
+                                k for k in result if k.startswith(prefix)
+                            ]
+                            self.assertGreater(
+                                len(included_metrics),
+                                0,
+                            )
+
+                    if "excluded_suffixes" in test_case:
+                        for suffix in test_case["excluded_suffixes"]:
+                            suffix_metrics = [
+                                k for k in result if k.endswith(suffix)
+                            ]
+                            self.assertEqual(
+                                len(suffix_metrics),
+                                0,
+                            )
+
+                    if "expected_count" in test_case:
+                        self.assertEqual(
+                            len(result), test_case["expected_count"]
+                        )

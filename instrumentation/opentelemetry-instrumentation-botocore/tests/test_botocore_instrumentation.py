@@ -1,25 +1,18 @@
 # Copyright The OpenTelemetry Authors
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-License-Identifier: Apache-2.0
 import json
 import os
-from unittest.mock import ANY, Mock, patch
+from importlib.metadata import EntryPoint
+from unittest.mock import ANY, Mock, call, patch
 
 import botocore.session
 from botocore.exceptions import ParamValidationError
 from moto import mock_aws  # pylint: disable=import-error
 
 from opentelemetry import trace as trace_api
+from opentelemetry.instrumentation.auto_instrumentation import (
+    _load_instrumentors,
+)
 from opentelemetry.instrumentation.botocore import BotocoreInstrumentor
 from opentelemetry.instrumentation.utils import (
     suppress_http_instrumentation,
@@ -27,10 +20,22 @@ from opentelemetry.instrumentation.utils import (
 )
 from opentelemetry.propagate import get_global_textmap, set_global_textmap
 from opentelemetry.propagators.aws.aws_xray_propagator import TRACE_HEADER_KEY
+from opentelemetry.semconv._incubating.attributes import rpc_attributes
 from opentelemetry.semconv._incubating.attributes.cloud_attributes import (
     CLOUD_REGION,
 )
-from opentelemetry.semconv.trace import SpanAttributes
+from opentelemetry.semconv._incubating.attributes.exception_attributes import (
+    EXCEPTION_MESSAGE,
+    EXCEPTION_STACKTRACE,
+    EXCEPTION_TYPE,
+)
+from opentelemetry.semconv._incubating.attributes.http_attributes import (
+    HTTP_STATUS_CODE,
+)
+from opentelemetry.semconv._incubating.attributes.server_attributes import (
+    SERVER_ADDRESS,
+    SERVER_PORT,
+)
 from opentelemetry.test.mock_textmap import MockTextMapPropagator
 from opentelemetry.test.test_base import TestBase
 from opentelemetry.trace.span import format_span_id, format_trace_id
@@ -61,15 +66,15 @@ class TestBotocoreInstrumentor(TestBase):
 
     def _default_span_attributes(self, service: str, operation: str):
         return {
-            SpanAttributes.RPC_SYSTEM: "aws-api",
-            SpanAttributes.RPC_SERVICE: service,
-            SpanAttributes.RPC_METHOD: operation,
+            rpc_attributes.RPC_SYSTEM: "aws-api",
+            rpc_attributes.RPC_SERVICE: service,
+            rpc_attributes.RPC_METHOD: operation,
             CLOUD_REGION: self.region,
             "retry_attempts": 0,
-            SpanAttributes.HTTP_STATUS_CODE: 200,
+            HTTP_STATUS_CODE: 200,
             # Some services like IAM or STS have a global endpoint and exclude specified region.
-            SpanAttributes.SERVER_ADDRESS: f"{service.lower()}.{'' if self.region == 'aws-global' else self.region + '.'}amazonaws.com",
-            SpanAttributes.SERVER_PORT: 443,
+            SERVER_ADDRESS: f"{service.lower()}.{'' if self.region == 'aws-global' else self.region + '.'}amazonaws.com",
+            SERVER_PORT: 443,
         }
 
     def assert_only_span(self):
@@ -150,16 +155,16 @@ class TestBotocoreInstrumentor(TestBase):
         span = spans[0]
 
         expected = self._default_span_attributes("S3", "ListObjects")
-        expected.pop(SpanAttributes.HTTP_STATUS_CODE)
+        expected.pop(HTTP_STATUS_CODE)
         expected.pop("retry_attempts")
         self.assertEqual(expected, span.attributes)
         self.assertIs(span.status.status_code, trace_api.StatusCode.ERROR)
 
         self.assertEqual(1, len(span.events))
         event = span.events[0]
-        self.assertIn(SpanAttributes.EXCEPTION_STACKTRACE, event.attributes)
-        self.assertIn(SpanAttributes.EXCEPTION_TYPE, event.attributes)
-        self.assertIn(SpanAttributes.EXCEPTION_MESSAGE, event.attributes)
+        self.assertIn(EXCEPTION_STACKTRACE, event.attributes)
+        self.assertIn(EXCEPTION_TYPE, event.attributes)
+        self.assertIn(EXCEPTION_MESSAGE, event.attributes)
 
     @mock_aws
     def test_s3_client(self):
@@ -337,7 +342,7 @@ class TestBotocoreInstrumentor(TestBase):
         span = self.assert_only_span()
         expected = self._default_span_attributes("STS", "GetCallerIdentity")
         expected["aws.request_id"] = ANY
-        expected[SpanAttributes.SERVER_ADDRESS] = "sts.amazonaws.com"
+        expected[SERVER_ADDRESS] = "sts.amazonaws.com"
         # check for exact attribute set to make sure not to leak any sts secrets
         self.assertEqual(expected, dict(span.attributes))
 
@@ -515,8 +520,8 @@ class TestBotocoreInstrumentor(TestBase):
             "EC2",
             "DescribeInstances",
             attributes={
-                SpanAttributes.SERVER_ADDRESS: f"ec2.{self.region}.amazonaws.com",
-                SpanAttributes.SERVER_PORT: 443,
+                SERVER_ADDRESS: f"ec2.{self.region}.amazonaws.com",
+                SERVER_PORT: 443,
             },
         )
         self.memory_exporter.clear()
@@ -528,8 +533,8 @@ class TestBotocoreInstrumentor(TestBase):
             "IAM",
             "ListUsers",
             attributes={
-                SpanAttributes.SERVER_ADDRESS: "iam.amazonaws.com",
-                SpanAttributes.SERVER_PORT: 443,
+                SERVER_ADDRESS: "iam.amazonaws.com",
+                SERVER_PORT: 443,
                 CLOUD_REGION: "aws-global",
             },
         )
@@ -552,7 +557,37 @@ class TestBotocoreInstrumentor(TestBase):
                 "S3",
                 "ListBuckets",
                 attributes={
-                    SpanAttributes.SERVER_ADDRESS: "proxy.amazon.org",
-                    SpanAttributes.SERVER_PORT: 2025,
+                    SERVER_ADDRESS: "proxy.amazon.org",
+                    SERVER_PORT: 2025,
                 },
             )
+
+    @patch(
+        "opentelemetry.instrumentation.auto_instrumentation._load.get_dist_dependency_conflicts"
+    )
+    @patch("opentelemetry.instrumentation.auto_instrumentation._load._logger")
+    def test_instruments_with_botocore_installed(self, mock_logger, mock_dep):
+        def _load_instrumentor(ep: EntryPoint, **kwargs):
+            # simulate aiobotocore not being present
+            if ep.name == "aiobotocore":
+                raise ModuleNotFoundError("aiobotocore")
+
+        mock_distro = Mock()
+        mock_dep.return_value = None
+        mock_distro.load_instrumentor.side_effect = _load_instrumentor
+        _load_instrumentors(mock_distro)
+        eps = [
+            c[0][0].name for c in mock_distro.load_instrumentor.call_args_list
+        ]
+        self.assertIn("botocore", eps)
+        mock_logger.debug.assert_has_calls(
+            [
+                call("Instrumented %s", "botocore"),
+                call(
+                    "Skipping instrumentation %s: %s",
+                    "aiobotocore",
+                    "aiobotocore",
+                ),
+            ],
+            any_order=True,
+        )

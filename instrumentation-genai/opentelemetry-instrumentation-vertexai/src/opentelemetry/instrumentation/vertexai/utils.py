@@ -1,16 +1,5 @@
 # Copyright The OpenTelemetry Authors
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-License-Identifier: Apache-2.0
 
 # type: ignore[reportUnknownDeprecated]
 
@@ -52,12 +41,14 @@ from opentelemetry.semconv._incubating.attributes import (
 )
 from opentelemetry.semconv.attributes import server_attributes
 from opentelemetry.util.genai.types import (
+    Blob,
     ContentCapturingMode,
     FinishReason,
     MessagePart,
     Text,
-    ToolCall,
+    ToolCallRequest,
     ToolCallResponse,
+    Uri,
 )
 from opentelemetry.util.genai.utils import get_content_capturing_mode
 from opentelemetry.util.types import AnyValue, AttributeValue
@@ -167,24 +158,23 @@ def get_genai_request_attributes(  # pylint: disable=too-many-branches
         attributes[GenAIAttributes.GEN_AI_REQUEST_STOP_SEQUENCES] = (
             generation_config.stop_sequences
         )
-    if use_latest_semconvs:
-        if "seed" in generation_config:
-            attributes[GenAIAttributes.GEN_AI_REQUEST_SEED] = (
-                generation_config.seed
+    if "seed" in generation_config:
+        attributes[GenAIAttributes.GEN_AI_REQUEST_SEED] = (
+            generation_config.seed
+        )
+    if "candidate_count" in generation_config:
+        attributes[GenAIAttributes.GEN_AI_REQUEST_CHOICE_COUNT] = (
+            generation_config.candidate_count
+        )
+    if "response_mime_type" in generation_config:
+        if generation_config.response_mime_type == "text/plain":
+            attributes[GenAIAttributes.GEN_AI_OUTPUT_TYPE] = "text"
+        elif generation_config.response_mime_type == "application/json":
+            attributes[GenAIAttributes.GEN_AI_OUTPUT_TYPE] = "json"
+        else:
+            attributes[GenAIAttributes.GEN_AI_OUTPUT_TYPE] = (
+                generation_config.response_mime_type
             )
-        if "candidate_count" in generation_config:
-            attributes[GenAIAttributes.GEN_AI_REQUEST_CHOICE_COUNT] = (
-                generation_config.candidate_count
-            )
-        if "response_mime_type" in generation_config:
-            if generation_config.response_mime_type == "text/plain":
-                attributes[GenAIAttributes.GEN_AI_OUTPUT_TYPE] = "text"
-            elif generation_config.response_mime_type == "application/json":
-                attributes[GenAIAttributes.GEN_AI_OUTPUT_TYPE] = "json"
-            else:
-                attributes[GenAIAttributes.GEN_AI_OUTPUT_TYPE] = (
-                    generation_config.response_mime_type
-                )
 
     return attributes
 
@@ -309,21 +299,15 @@ def request_to_events(
         yield user_event(role=content.role, content=request_content)
 
 
-@dataclass
-class BlobPart:
-    data: bytes
-    mime_type: str
-    type: Literal["blob"] = "blob"
-
-
-@dataclass
-class FileDataPart:
-    mime_type: str
-    uri: str
-    type: Literal["file_data"] = "file_data"
-
-    class Config:
-        extra = "allow"
+def _modality_from_mime_type(mime_type: str) -> str:
+    """Infer modality from MIME type prefix."""
+    if mime_type.startswith("image/"):
+        return "image"
+    if mime_type.startswith("video/"):
+        return "video"
+    if mime_type.startswith("audio/"):
+        return "audio"
+    return mime_type
 
 
 def convert_content_to_message_parts(
@@ -342,7 +326,7 @@ def convert_content_to_message_parts(
         elif "function_call" in part:
             part = part.function_call
             parts.append(
-                ToolCall(
+                ToolCallRequest(
                     id=f"{part.name}_{idx}",
                     name=part.name,
                     arguments=json_format.MessageToDict(
@@ -354,14 +338,22 @@ def convert_content_to_message_parts(
             parts.append(Text(content=part.text))
         elif "inline_data" in part:
             part = part.inline_data
+            mime_type = part.mime_type or ""
             parts.append(
-                BlobPart(mime_type=part.mime_type or "", data=part.data or b"")
+                Blob(
+                    mime_type=mime_type,
+                    modality=_modality_from_mime_type(mime_type),
+                    content=part.data or b"",
+                )
             )
         elif "file_data" in part:
             part = part.file_data
+            mime_type = part.mime_type or ""
             parts.append(
-                FileDataPart(
-                    mime_type=part.mime_type or "", uri=part.file_uri or ""
+                Uri(
+                    mime_type=mime_type,
+                    modality=_modality_from_mime_type(mime_type),
+                    uri=part.file_uri or "",
                 )
             )
         else:

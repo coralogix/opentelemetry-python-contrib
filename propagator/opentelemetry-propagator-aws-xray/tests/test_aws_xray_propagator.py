@@ -1,16 +1,5 @@
 # Copyright The OpenTelemetry Authors
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-License-Identifier: Apache-2.0
 
 import unittest
 from unittest.mock import Mock, patch
@@ -335,3 +324,48 @@ class AwsXRayPropagatorTest(unittest.TestCase):
         self.assertEqual(
             AwsXRayPropagatorTest.XRAY_PROPAGATOR.fields, inject_fields
         )
+
+    def test_extract_trace_state_from_context(self):
+        """Test that extract properly propagates the trace state extracted by other propagators."""
+        context_with_extracted = AwsXRayPropagatorTest.XRAY_PROPAGATOR.extract(
+            CaseInsensitiveDict(
+                {
+                    TRACE_HEADER_KEY: "Root=1-8a3c60f7-d188f8fa79d48a391a778fa6;Parent=53995c3f42cd8ad8;Sampled=0",
+                }
+            ),
+            context=set_span_in_context(
+                trace_api.NonRecordingSpan(
+                    SpanContext(
+                        int(TRACE_ID_BASE16, 16),
+                        int(SPAN_ID_BASE16, 16),
+                        True,
+                        DEFAULT_TRACE_OPTIONS,
+                        TraceState([("foo", "bar"), ("baz", "qux")]),
+                    )
+                )
+            ),
+        )
+
+        extracted_span_context = get_nested_span_context(
+            context_with_extracted
+        )
+        expected_trace_state = TraceState([("foo", "bar"), ("baz", "qux")])
+
+        self.assertEqual(
+            extracted_span_context.trace_state, expected_trace_state
+        )
+
+    def test_extract_no_trace_state_from_context(self):
+        """Test that extract defaults to an empty trace state correctly."""
+        context_with_extracted = AwsXRayPropagatorTest.XRAY_PROPAGATOR.extract(
+            CaseInsensitiveDict(
+                {
+                    TRACE_HEADER_KEY: "Root=1-8a3c60f7-d188f8fa79d48a391a778fa6;Parent=53995c3f42cd8ad8;Sampled=0",
+                }
+            )
+        )
+
+        extracted_span_context = get_nested_span_context(
+            context_with_extracted
+        )
+        self.assertEqual(extracted_span_context.trace_state, TraceState([]))

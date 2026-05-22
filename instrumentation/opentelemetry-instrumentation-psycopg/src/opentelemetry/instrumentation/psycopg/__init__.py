@@ -1,16 +1,5 @@
 # Copyright The OpenTelemetry Authors
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-License-Identifier: Apache-2.0
 
 """
 The integration with PostgreSQL supports the `Psycopg`_ library. It can be enabled by
@@ -64,7 +53,7 @@ sqlcommenter enabled will have configurable key-value pairs appended to them, e.
 propagation between database client and server when database log records are enabled.
 For more information, see:
 
-* `Semantic Conventions - Database Spans <https://github.com/open-telemetry/semantic-conventions/blob/main/docs/database/database-spans.md#sql-commenter>`_
+* `Semantic Conventions - Database Spans <https://github.com/open-telemetry/semantic-conventions/blob/main/docs/db/database-spans.md#sql-commenter>`_
 * `sqlcommenter <https://google.github.io/sqlcommenter/>`_
 
 .. code:: python
@@ -119,23 +108,23 @@ The following sqlcomment key-values can be opted out of through ``commenter_opti
 SQLComment in span attribute
 ****************************
 If sqlcommenter is enabled, you can opt into the inclusion of sqlcomment in
-the query span ``db.statement`` attribute for your needs. If ``commenter_options``
-have been set, the span attribute comment will also be configured by this
-setting.
+the query span ``db.statement`` and/or ``db.query.text`` attribute for your
+needs. If ``commenter_options`` have been set, the span attribute comment
+will also be configured by this setting.
 
 .. code:: python
 
     from opentelemetry.instrumentation.psycopg import PsycopgInstrumentor
 
     # Opts into sqlcomment for Psycopg trace integration.
-    # Opts into sqlcomment for `db.statement` span attribute.
+    # Opts into sqlcomment for `db.statement` and/or `db.query.text` span attribute.
     PsycopgInstrumentor().instrument(
         enable_commenter=True,
         enable_attribute_commenter=True,
     )
 
 Warning:
-    Capture of sqlcomment in ``db.statement`` may have high cardinality without platform normalization. See `Semantic Conventions for database spans <https://opentelemetry.io/docs/specs/semconv/database/database-spans/#generating-a-summary-of-the-query-text>`_ for more information.
+    Capture of sqlcomment in ``db.statement``/``db.query.text`` may have high cardinality without platform normalization. See `Semantic Conventions for database spans <https://opentelemetry.io/docs/specs/semconv/database/database-spans/#generating-a-summary-of-the-query-text>`_ for more information.
 
 API
 ---
@@ -147,7 +136,7 @@ import logging
 from typing import Any, Callable, Collection, TypeVar
 
 import psycopg  # pylint: disable=import-self
-from psycopg.sql import Composed  # pylint: disable=no-name-in-module
+from psycopg.sql import Composable  # pylint: disable=no-name-in-module
 
 from opentelemetry.instrumentation import dbapi
 from opentelemetry.instrumentation.instrumentor import BaseInstrumentor
@@ -268,9 +257,14 @@ class PsycopgInstrumentor(BaseInstrumentor):
             setattr(
                 connection, _OTEL_CURSOR_FACTORY_KEY, connection.cursor_factory
             )
-            connection.cursor_factory = _new_cursor_factory(
-                tracer_provider=tracer_provider
-            )
+            if isinstance(connection, psycopg.AsyncConnection):
+                connection.cursor_factory = _new_cursor_async_factory(
+                    tracer_provider=tracer_provider
+                )
+            else:
+                connection.cursor_factory = _new_cursor_factory(
+                    tracer_provider=tracer_provider
+                )
             connection._is_instrumented_by_opentelemetry = True
         else:
             _logger.warning(
@@ -333,7 +327,7 @@ class CursorTracer(dbapi.CursorTracer):
             return ""
 
         statement = args[0]
-        if isinstance(statement, Composed):
+        if isinstance(statement, Composable):
             statement = statement.as_string(cursor)
 
         # `statement` can be empty string. See #2643
@@ -348,7 +342,7 @@ class CursorTracer(dbapi.CursorTracer):
             return ""
 
         statement = args[0]
-        if isinstance(statement, Composed):
+        if isinstance(statement, Composable):
             statement = statement.as_string(cursor)
         return statement
 

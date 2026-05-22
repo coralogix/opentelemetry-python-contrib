@@ -1,23 +1,15 @@
 # Copyright The OpenTelemetry Authors
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-License-Identifier: Apache-2.0
 
 import unittest
 
 from opentelemetry.semconv._incubating.attributes.user_agent_attributes import (
     UserAgentSyntheticTypeValues,
 )
-from opentelemetry.util.http import detect_synthetic_user_agent
+from opentelemetry.util.http import (
+    detect_synthetic_user_agent,
+    normalize_user_agent,
+)
 
 
 class TestDetectSyntheticUserAgent(unittest.TestCase):
@@ -86,3 +78,44 @@ class TestDetectSyntheticUserAgent(unittest.TestCase):
         result = detect_synthetic_user_agent(user_agent)
         # alwayson should be checked first and return 'test'
         self.assertEqual(result, UserAgentSyntheticTypeValues.TEST.value)
+
+    def test_bytes_like_user_agent(self):
+        """Test that bytes-like user agents are decoded and detected."""
+
+        test_cases = [
+            (b"alwayson-monitor/1.0", UserAgentSyntheticTypeValues.TEST.value),
+            (
+                bytearray(b"googlebot/2.1"),
+                UserAgentSyntheticTypeValues.BOT.value,
+            ),
+            (memoryview(b"MyApp/1.0"), None),
+        ]
+
+        for user_agent_raw, expected in test_cases:
+            with self.subTest(user_agent=user_agent_raw):
+                normalized = normalize_user_agent(user_agent_raw)
+                result = detect_synthetic_user_agent(normalized)
+                self.assertEqual(result, expected)
+
+
+class TestNormalizeUserAgent(unittest.TestCase):
+    def test_preserves_string(self):
+        self.assertEqual(normalize_user_agent("Mozilla"), "Mozilla")
+
+    def test_decodes_bytes(self):
+        self.assertEqual(
+            normalize_user_agent(b"Custom-Client/1.0"), "Custom-Client/1.0"
+        )
+
+    def test_decodes_bytearray(self):
+        self.assertEqual(
+            normalize_user_agent(bytearray(b"Bot/2.0")), "Bot/2.0"
+        )
+
+    def test_decodes_memoryview(self):
+        self.assertEqual(
+            normalize_user_agent(memoryview(b"Monitor/3.0")), "Monitor/3.0"
+        )
+
+    def test_none(self):
+        self.assertIsNone(normalize_user_agent(None))
