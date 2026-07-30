@@ -63,6 +63,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from enum import Enum
 from importlib import import_module
 from typing import TYPE_CHECKING, Any, Callable, Collection
 from urllib.parse import urlencode
@@ -71,6 +72,10 @@ from wrapt import wrap_function_wrapper
 
 from opentelemetry import context as context_api
 from opentelemetry.context.context import Context
+from opentelemetry.instrumentation.aws_lambda._sqs import (
+    _is_sqs_event,
+    _run_sqs_handler,
+)
 from opentelemetry.instrumentation.cidict import CIDict
 from opentelemetry.instrumentation.aws_lambda.package import _instruments
 from opentelemetry.instrumentation.aws_lambda.version import __version__
@@ -86,6 +91,7 @@ from opentelemetry.semconv._incubating.attributes.cloud_attributes import (
 from opentelemetry.semconv._incubating.attributes.faas_attributes import (
     FAAS_INVOCATION_ID,
     FAAS_TRIGGER,
+    FaasTriggerValues,
 )
 from opentelemetry.semconv._incubating.attributes.http_attributes import (
     HTTP_METHOD,
@@ -100,7 +106,6 @@ from opentelemetry.semconv._incubating.attributes.net_attributes import (
 )
 from opentelemetry.semconv.trace import SpanAttributes
 from opentelemetry.trace import (
-    Span,
     SpanKind,
     Tracer,
     TracerProvider,
@@ -121,6 +126,7 @@ from opentelemetry.instrumentation.aws_lambda.coralogix import context as cx_con
 logger = logging.getLogger(__name__)
 
 _HANDLER = "_HANDLER"
+
 _X_AMZN_TRACE_ID = "_X_AMZN_TRACE_ID"
 ORIG_HANDLER = "ORIG_HANDLER"
 OTEL_INSTRUMENTATION_AWS_LAMBDA_FLUSH_TIMEOUT = (
@@ -129,6 +135,7 @@ OTEL_INSTRUMENTATION_AWS_LAMBDA_FLUSH_TIMEOUT = (
 
 if TYPE_CHECKING:
     import typing
+    from collections.abc import MutableMapping
 
     class LambdaContext(typing.Protocol):
         """Type definition for AWS Lambda context object.
@@ -149,6 +156,20 @@ if TYPE_CHECKING:
         aws_request_id: str
         log_group_name: str
         log_stream_name: str
+
+
+class _LambdaEventType(Enum):
+    SQS = "sqs"
+    API_GATEWAY = "api_gateway"
+    UNKNOWN = "unknown"
+
+
+def _get_lambda_event_type(lambda_event: Any) -> _LambdaEventType:
+    if _is_sqs_event(lambda_event):
+        return _LambdaEventType.SQS
+    if isinstance(lambda_event, dict) and lambda_event.get("requestContext"):
+        return _LambdaEventType.API_GATEWAY
+    return _LambdaEventType.UNKNOWN
 
 
 def _default_event_context_extractor(lambda_event: Any) -> Context:
@@ -209,106 +230,77 @@ def _determine_parent_context(
     return event_context_extractor(lambda_event)
 
 
-def _set_api_gateway_v1_proxy_attributes(
-    lambda_event: Any, span: Span
-) -> Span:
+def _get_api_gateway_v1_proxy_attributes(
+    lambda_event: Any,
+) -> MutableMapping[str, Any]:
     """Sets HTTP attributes for REST APIs and v1 HTTP APIs
 
     More info:
     https://docs.aws.amazon.com/apigateway/latest/developerguide/set-up-lambda-proxy-integrations.html#api-gateway-simple-proxy-for-lambda-input-format
     """
-    span.set_attribute(HTTP_METHOD, lambda_event.get("httpMethod"))
+    attributes = {}
+    attributes[HTTP_METHOD] = lambda_event.get("httpMethod")
 
     if lambda_event.get("body"):
-        span.set_attribute(
-            "http.request.body",
-            limit_string_size(lambda_event.get("body")),
+        attributes["http.request.body"] = limit_string_size(
+            lambda_event.get("body")
         )
 
     if lambda_event.get("headers"):
         headers = CIDict(lambda_event["headers"])
         if "User-Agent" in headers:
-            span.set_attribute(
-                HTTP_USER_AGENT,
-                headers["User-Agent"],
-            )
+            attributes[HTTP_USER_AGENT] = headers["User-Agent"]
         if "X-Forwarded-Proto" in headers:
-            span.set_attribute(
-                HTTP_SCHEME,
-                headers["X-Forwarded-Proto"],
-            )
+            attributes[HTTP_SCHEME] = headers["X-Forwarded-Proto"]
         if "Host" in headers:
-            span.set_attribute(
-                NET_HOST_NAME,
-                headers["Host"],
-            )
+            attributes[NET_HOST_NAME] = headers["Host"]
+
     if "resource" in lambda_event:
-        span.set_attribute(HTTP_ROUTE, lambda_event["resource"])
+        attributes[HTTP_ROUTE] = lambda_event["resource"]
 
         if lambda_event.get("queryStringParameters"):
-            span.set_attribute(
-                HTTP_TARGET,
-                f"{lambda_event['resource']}?{urlencode(lambda_event['queryStringParameters'])}",
+            attributes[HTTP_TARGET] = (
+                f"{lambda_event['resource']}?{urlencode(lambda_event['queryStringParameters'])}"
             )
         else:
-            span.set_attribute(HTTP_TARGET, lambda_event["resource"])
+            attributes[HTTP_TARGET] = lambda_event["resource"]
+    return attributes
 
-    return span
 
-
-def _set_api_gateway_v2_proxy_attributes(
-    lambda_event: Any, span: Span
-) -> Span:
+def _get_api_gateway_v2_proxy_attributes(
+    lambda_event: Any,
+) -> MutableMapping[str, Any]:
     """Sets HTTP attributes for v2 HTTP APIs
 
     More info:
     https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-develop-integrations-lambda.html
     """
+    attributes = {}
     if "domainName" in lambda_event["requestContext"]:
-        span.set_attribute(
-            NET_HOST_NAME,
-            lambda_event["requestContext"]["domainName"],
-        )
-    
-    if lambda_event.get("body"):
-        span.set_attribute(
-            "http.request.body",
-            limit_string_size(lambda_event.get("body")),
-        )
+        attributes[NET_HOST_NAME] = lambda_event["requestContext"][
+            "domainName"
+        ]
 
-    span.set_attribute(
-        SpanAttributes.NET_HOST_NAME,
-        lambda_event["requestContext"].get("domainName"),
-    )
+    if lambda_event.get("body"):
+        attributes["http.request.body"] = limit_string_size(
+            lambda_event.get("body")
+        )
 
     if lambda_event["requestContext"].get("http"):
-        if "method" in lambda_event["requestContext"]["http"]:
-            span.set_attribute(
-                HTTP_METHOD,
-                lambda_event["requestContext"]["http"]["method"],
-            )
-        if "userAgent" in lambda_event["requestContext"]["http"]:
-            span.set_attribute(
-                HTTP_USER_AGENT,
-                lambda_event["requestContext"]["http"]["userAgent"],
-            )
-        if "path" in lambda_event["requestContext"]["http"]:
-            span.set_attribute(
-                HTTP_ROUTE,
-                lambda_event["requestContext"]["http"]["path"],
-            )
+        http = lambda_event["requestContext"]["http"]
+        if "method" in http:
+            attributes[HTTP_METHOD] = http["method"]
+        if "userAgent" in http:
+            attributes[HTTP_USER_AGENT] = http["userAgent"]
+        if "path" in http:
+            attributes[HTTP_ROUTE] = http["path"]
             if lambda_event.get("rawQueryString"):
-                span.set_attribute(
-                    HTTP_TARGET,
-                    f"{lambda_event['requestContext']['http']['path']}?{lambda_event['rawQueryString']}",
+                attributes[HTTP_TARGET] = (
+                    f"{http['path']}?{lambda_event['rawQueryString']}"
                 )
             else:
-                span.set_attribute(
-                    HTTP_TARGET,
-                    lambda_event["requestContext"]["http"]["path"],
-                )
-
-    return span
+                attributes[HTTP_TARGET] = http["path"]
+    return attributes
 
 
 def _get_lambda_context_attributes(
@@ -374,6 +366,7 @@ def _instrument(
         )
 
         lambda_event = args[0]
+        lambda_context = args[1]
 
         parent_context = cx_context.determine_parent_context(
             lambda_event,
@@ -406,6 +399,26 @@ def _instrument(
 
         token = context_api.attach(parent_context)
 
+        event_type = _get_lambda_event_type(lambda_event)
+        span_attributes: MutableMapping[str, Any] = (
+            _get_lambda_context_attributes(lambda_context)
+        )
+        if event_type is _LambdaEventType.SQS:
+            span_attributes[FAAS_TRIGGER] = FaasTriggerValues.PUBSUB.value
+        elif event_type is _LambdaEventType.API_GATEWAY:
+            # If the request came from an API Gateway, extract http attributes from the event
+            # https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/semantic_conventions/instrumentation/aws-lambda.md#api-gateway
+            # https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/semantic_conventions/http.md#http-server-semantic-conventions
+            span_attributes[FAAS_TRIGGER] = "http"
+            if lambda_event.get("version") == "2.0":
+                span_attributes |= _get_api_gateway_v2_proxy_attributes(
+                    lambda_event
+                )
+            else:
+                span_attributes |= _get_api_gateway_v1_proxy_attributes(
+                    lambda_event
+                )
+
         # Get coralogix span and context
         cx_instrumentor = cxinstrumentor.get_cx_instrumentor(
             tracer,
@@ -424,7 +437,7 @@ def _instrument(
 
         if trigger_span is not None:
             trigger_span.set_attribute("cx.internal.span.role", "trigger")
-     
+
         if trigger_context is not None:
             invocation_parent_context = trigger_context
         else:
@@ -435,6 +448,7 @@ def _instrument(
                     name=orig_handler_name,
                     context=invocation_parent_context,
                     kind=span_kind,
+                    attributes=span_attributes,
                 )
             invocation_span.set_attribute("cx.internal.span.role", "invocation")
         except Exception as e:  # pylint: disable=broad-except
@@ -492,35 +506,29 @@ def _instrument(
 
                 exception = None
                 result = None
+
                 try:
-                    result = call_wrapped(*args, **kwargs)
-                except Exception as exc:  # pylint: disable=W0703
+                    if event_type is _LambdaEventType.SQS:
+                        result = _run_sqs_handler(
+                            tracer, lambda_event, call_wrapped, args, kwargs
+                        )
+                    else:
+                        result = call_wrapped(*args, **kwargs)
+                # pylint: disable-next=broad-exception-caught
+                except Exception as exc:
                     exception = exc
                     span.set_status(Status(StatusCode.ERROR))
                     span.record_exception(exception)
 
-                # If the request came from an API Gateway, extract http attributes from the event
-                # https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/semantic_conventions/instrumentation/aws-lambda.md#api-gateway
-                # https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/semantic_conventions/http.md#http-server-semantic-conventions
-                if isinstance(lambda_event, dict) and lambda_event.get(
-                    "requestContext"
+                if (
+                    event_type is _LambdaEventType.API_GATEWAY
+                    and isinstance(result, dict)
+                    and result.get("statusCode")
                 ):
-                    span.set_attribute(FAAS_TRIGGER, "http")
-
-                    if lambda_event.get("version") == "2.0":
-                        _set_api_gateway_v2_proxy_attributes(
-                            lambda_event, span
-                        )
-                    else:
-                        _set_api_gateway_v1_proxy_attributes(
-                            lambda_event, span
-                        )
-
-                    if isinstance(result, dict) and result.get("statusCode"):
-                        span.set_attribute(
-                            HTTP_STATUS_CODE,
-                            result.get("statusCode"),
-                        )
+                    span.set_attribute(
+                        HTTP_STATUS_CODE,
+                        result.get("statusCode"),
+                    )
         finally:
             if token:
                 context_api.detach(token)

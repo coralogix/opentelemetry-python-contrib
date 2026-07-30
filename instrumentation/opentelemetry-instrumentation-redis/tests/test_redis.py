@@ -230,6 +230,58 @@ class TestRedis(TestBase):
         span = spans[0]
         self.assertEqual(span.attributes.get(custom_attribute_name), "GET")
 
+    def test_request_hook_exception(self):
+        def request_hook(_span, _conn, _args, _kwargs):
+            raise ValueError("hook error")
+
+        redis_client = redis.Redis()
+        connection = redis.connection.Connection()
+        redis_client.connection = connection
+
+        RedisInstrumentor().uninstrument()
+        RedisInstrumentor().instrument(
+            tracer_provider=self.tracer_provider, request_hook=request_hook
+        )
+
+        with self.assertLogs(
+            "opentelemetry.instrumentation.redis", level="WARNING"
+        ) as log_ctx:
+            with mock.patch.object(connection, "send_command"):
+                with mock.patch.object(
+                    redis_client, "parse_response", return_value="ok"
+                ):
+                    redis_client.get("key")
+
+        spans = self.memory_exporter.get_finished_spans()
+        self.assertEqual(len(spans), 1)
+        self.assertTrue(any("request_hook" in msg for msg in log_ctx.output))
+
+    def test_response_hook_exception(self):
+        def response_hook(_span, _conn, _response):
+            raise ValueError("hook error")
+
+        redis_client = redis.Redis()
+        connection = redis.connection.Connection()
+        redis_client.connection = connection
+
+        RedisInstrumentor().uninstrument()
+        RedisInstrumentor().instrument(
+            tracer_provider=self.tracer_provider, response_hook=response_hook
+        )
+
+        with self.assertLogs(
+            "opentelemetry.instrumentation.redis", level="WARNING"
+        ) as log_ctx:
+            with mock.patch.object(connection, "send_command"):
+                with mock.patch.object(
+                    redis_client, "parse_response", return_value="ok"
+                ):
+                    redis_client.get("key")
+
+        spans = self.memory_exporter.get_finished_spans()
+        self.assertEqual(len(spans), 1)
+        self.assertTrue(any("response_hook" in msg for msg in log_ctx.output))
+
     def test_query_sanitizer_enabled(self):
         redis_client = redis.Redis()
         connection = redis.connection.Connection()
@@ -346,6 +398,42 @@ class TestRedis(TestBase):
             span.attributes[NET_TRANSPORT],
             NetTransportValues.OTHER.value,
         )
+
+    def test_connection_pool_without_connection_kwargs(self):
+        redis_client = redis.Redis()
+        redis_client.connection_pool = mock.Mock(spec=["disconnect"])
+
+        with mock.patch.object(redis_client, "connection"):
+            redis_client.set("key", "value")
+
+        spans = self.memory_exporter.get_finished_spans()
+        self.assertEqual(len(spans), 1)
+
+        span = spans[0]
+        self.assertEqual(span.status.status_code, trace.StatusCode.UNSET)
+        self.assertEqual(span.events, ())
+        # The base db.statement is still recorded; connection-derived
+        # attributes are simply absent when they cannot be extracted.
+        self.assertIn(DB_STATEMENT, span.attributes)
+        self.assertNotIn(DB_SYSTEM, span.attributes)
+        self.assertNotIn(NET_PEER_NAME, span.attributes)
+
+    def test_connection_pool_without_connection_kwargs_async(self):
+        redis_client = redis.asyncio.Redis()
+        redis_client.connection_pool = mock.Mock(spec=["disconnect"])
+
+        with mock.patch.object(redis_client, "connection", AsyncMock()):
+            asyncio.run(redis_client.set("key", "value"))
+
+        spans = self.memory_exporter.get_finished_spans()
+        self.assertEqual(len(spans), 1)
+
+        span = spans[0]
+        self.assertEqual(span.status.status_code, trace.StatusCode.UNSET)
+        self.assertEqual(span.events, ())
+        self.assertIn(DB_STATEMENT, span.attributes)
+        self.assertNotIn(DB_SYSTEM, span.attributes)
+        self.assertNotIn(NET_PEER_NAME, span.attributes)
 
     def test_connection_error(self):
         server = fakeredis.FakeServer()
@@ -647,6 +735,42 @@ class TestRedisAsync(TestBase, IsolatedAsyncioTestCase):
         # after un-instrumenting the query should not be recorder
         await self.client.set("key", "value")
         spans = self.assert_span_count(0)
+
+    @pytest.mark.asyncio
+    async def test_request_hook_exception(self):
+        def request_hook(_span, _conn, _args, _kwargs):
+            raise ValueError("hook error")
+
+        self.instrumentor.instrument(
+            tracer_provider=self.tracer_provider, request_hook=request_hook
+        )
+
+        with self.assertLogs(
+            "opentelemetry.instrumentation.redis", level="WARNING"
+        ) as log_ctx:
+            await self.client.set("key", "value")
+
+        self.assert_span_count(1)
+        self.assertTrue(any("request_hook" in msg for msg in log_ctx.output))
+        self.instrumentor.uninstrument()
+
+    @pytest.mark.asyncio
+    async def test_response_hook_exception(self):
+        def response_hook(_span, _conn, _response):
+            raise ValueError("hook error")
+
+        self.instrumentor.instrument(
+            tracer_provider=self.tracer_provider, response_hook=response_hook
+        )
+
+        with self.assertLogs(
+            "opentelemetry.instrumentation.redis", level="WARNING"
+        ) as log_ctx:
+            await self.client.set("key", "value")
+
+        self.assert_span_count(1)
+        self.assertTrue(any("response_hook" in msg for msg in log_ctx.output))
+        self.instrumentor.uninstrument()
 
     @pytest.mark.asyncio
     async def test_span_name_empty_pipeline(self):
