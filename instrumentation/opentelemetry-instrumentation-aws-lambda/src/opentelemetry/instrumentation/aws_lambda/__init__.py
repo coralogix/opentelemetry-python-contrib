@@ -366,6 +366,7 @@ def _instrument(
         )
 
         lambda_event = args[0]
+        lambda_context = args[1]
 
         parent_context = cx_context.determine_parent_context(
             lambda_event,
