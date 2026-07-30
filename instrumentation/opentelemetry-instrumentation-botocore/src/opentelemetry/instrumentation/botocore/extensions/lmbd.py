@@ -57,11 +57,11 @@ class _OpInvoke(_LambdaOperation):
     def extract_attributes(
         cls, call_context: _AwsSdkCallContext, attributes: _AttributeMapT
     ):
-        attributes[SpanAttributes.FAAS_INVOKED_PROVIDER] = "aws"
-        attributes[SpanAttributes.FAAS_INVOKED_NAME] = (
+        attributes[FAAS_INVOKED_PROVIDER] = "aws"
+        attributes[FAAS_INVOKED_NAME] = (
             cls._parse_function_name(call_context)
         )
-        attributes[SpanAttributes.FAAS_INVOKED_REGION] = call_context.region
+        attributes[FAAS_INVOKED_REGION] = call_context.region
         if call_context.params.get("Payload") is not None:
             attributes["rpc.request.body"] = limit_string_size(call_context.params.get("Payload"))
 
